@@ -1,0 +1,11 @@
+[project]
+name = "log-reader"
+version = "0.1.0"
+description = "Summarize a file with a local Ollama model"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "langchain>=1.4.6",
+    "langchain-ollama>=1.1.0",
+    "langchain-text-splitters>=1.1.3",
+]

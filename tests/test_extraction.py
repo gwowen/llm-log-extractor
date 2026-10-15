@@ -246,11 +246,45 @@ class StackAndLifecycleTest(unittest.TestCase):
         assert events is not None
         failure = event_with(events, 3599)
         text = "\n".join(line.raw for line in failure.lines())
+        numbers = line_numbers(failure)
+        self.assertIn(3596, numbers)
+        self.assertIn(3596, failure.confirmed)
+        self.assertNotIn(3572, numbers)
+        self.assertIn("token validation ok", text)
         self.assertIn("tenant_id_present=false", text)
         self.assertIn("tenant.rs:126", text)
         self.assertIn("status=6/ABRT", text)
         self.assertIn("Started northstar-api.service", text)
         self.assertNotIn("rust_begin_unwind", text)
+
+    def test_auth_success_is_kept_only_beside_a_claim_gap(self) -> None:
+        events = main.extract_events(
+            "\n".join(
+                [
+                    "2026-10-15T10:00:00.000Z INFO app: starting",
+                    "2026-10-15T10:00:00.100Z INFO app: listening",
+                    "2026-10-15T10:00:00.200Z INFO app: ready",
+                    "2026-10-15T10:00:01.000Z INFO app.http: Incoming GET /usage requestId=req-1 traceId=abc",
+                    "2026-10-15T10:00:01.010Z DEBUG app.auth.jwt: token validation ok signature=valid subject=user-1 requestId=req-1 traceId=abc",
+                    "2026-10-15T10:00:01.020Z DEBUG sqlx.query: query=SELECT id FROM tenants requestId=req-1 traceId=abc",
+                    "2026-10-15T10:00:01.030Z INFO app.http: Outgoing GET /usage status=200 requestId=req-1 traceId=abc",
+                    "2026-10-15T10:00:01.040Z DEBUG app.auth.claims: tenant_id_present=false requestId=req-1 traceId=abc",
+                    "2026-10-15T10:00:01.050Z ERROR app.runtime: panic requestId=req-1 traceId=abc",
+                    "authenticated request must contain tenant_id claim",
+                    "2026-10-15T10:00:02.000Z DEBUG auth.jwt: validation=ok kid=jwt-rsa subject=user-2 trace_id=def",
+                    "2026-10-15T10:00:02.010Z ERROR app.worker: NullPointerException: missing client trace_id=def",
+                ]
+            )
+        )
+        assert events is not None
+        panic = next(event for event in events if "panic" in event.seed.raw)
+        other = next(event for event in events if "NullPointerException" in event.seed.raw)
+        kept = line_numbers(panic)
+        self.assertIn(5, kept)
+        self.assertIn(8, kept)
+        self.assertNotIn(6, kept)
+        self.assertNotIn(7, kept)
+        self.assertNotIn(11, line_numbers(other))
 
     def test_nodejs_rejection_keeps_the_job_and_the_process_exit(self) -> None:
         events = main.extract_events((LOGS / "nodejs_express_crash_noisy.log").read_text())

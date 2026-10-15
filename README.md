@@ -37,7 +37,11 @@ uv run main.py --dump-events path/to/file
 
 `--format human` is the default. It asks the model for **Main failure** and **Related events**. `--format agent` writes a Markdown incident brief, including a task for a coding agent. `--format json` writes that same incident as JSON, with an `analysis` object. Both call Ollama unless `--no-llm` is set. `--model` selects a different local model. `--output` writes the report to a file instead of stdout.
 
-`--dump-events` prints the incident grouping and the lines that would be sent to the model, and does not call Ollama. It ignores `--format`.
+`--format agent` and `--format json` need a timestamped log. Another text file exits 1. `--no-llm` on a non-log file also exits 1, because that summary is a model call.
+
+A timestamped log with no kept errors or warnings prints `No relevant errors or warnings were found.` for the human report. Agent and JSON still write a report that says no primary failure was identified.
+
+`--dump-events` prints the incident grouping and the lines that would be sent to the model, and does not call Ollama. It ignores `--format`. A file that is not a timestamped log prints `Not a timestamped log.`
 
 The summary is written to stdout. Progress messages go to stderr, so you can pipe the summary:
 

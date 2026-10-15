@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Guidance for working on Log and Order. The program is one module, [`main.py`](main.py), managed with [uv](https://docs.astral.sh/uv/).
+Guidance for working on Log and Order. The program is the [`log_and_order`](log_and_order) package, run through the [`main.py`](main.py) wrapper, and managed with [uv](https://docs.astral.sh/uv/).
 
 ## Commands
 
@@ -15,15 +15,19 @@ uv run python -m unittest
 
 Ollama must be running locally with `LiquidAI/lfm2.5-2.6b` for a human report, a non-log summary, or the default agent and JSON enrichment. `--no-llm` skips the model. The report goes to stdout unless `--output` is set. Progress goes to stderr.
 
-`tests/test_extraction.py` checks extraction and report assembly without the model. It covers cascade grouping, prelude lines, repeat collapsing, and the Spring, Django, Gin, Actix, Node.js, and ASP.NET fixtures. `tests/test_reports.py` checks the deterministic agent and JSON reports on those fixtures. `tests/test_enrichment.py` checks enrichment with a fake model. A full run of `example-logs/spring_boot_incident_noise.log` is the regression check for the human report.
+`tests/test_parser.py` checks record parsing and runtime-frame filtering. `tests/test_extraction.py` checks repeat collapsing and the fixture events. `tests/test_correlation.py` checks cascade grouping, prelude lines, and lifecycle. `tests/test_stacktraces.py` and `tests/test_incidents.py` check source locations and the deterministic incident. `tests/test_reports.py` checks the human, agent, and JSON reports. `tests/test_enrichment.py` checks enrichment with a fake model. `tests/test_cli.py` checks the command line. A full run of `example-logs/spring_boot_incident_noise.log` is the regression check for the human report.
+
+## Layout
+
+`log_and_order/cli.py` reads the file and writes the report. `pipeline.py` chooses the path. `config.py` holds the limits and the default model. `models.py` holds the shared dataclasses. `logs/` parses and correlates events. `is_serious` stays in `logs/correlation.py` because prelude and lifecycle attachment call it while grouping. `incidents/` builds the deterministic report and reads stack frames. `llm/` talks to Ollama. `reports/` only renders. Report modules do not call the model.
 
 ## What the program does
 
 `summarize` branches on the file:
 
-- A timestamped log (at least five `timestamp LEVEL` records) becomes events. Python selects one primary incident, the lines related to it, and the independent events. With `--format human` (the default), one ChatOllama call narrates only the incident, under **Main failure** and **Related events**. Python appends **Other warnings** from the independent events. If the model returns no answer after the retry, those two narrative sections are filled from the extracted lines.
-- `--format agent` writes one Markdown incident brief from those same events. `--format json` writes that same incident as data, including `schema_version` and `analysis`. Unless `--no-llm` is set, `enrich_incident` asks the model for a failure mechanism, hypotheses, investigation steps, and regression scenarios. Python validates that reply and drops claims that cite unseen log lines or unseen paths and symbols. A confirmed correlation is not causation. If Ollama cannot be reached, or the reply is empty or invalid, the factual report is still written and stderr says enrichment failed. The Markdown brief leads with the executive summary and a Python-built task for a coding agent, then the failure, the labeled analysis, the observed facts, and the timeline. Stack text, raw excerpts, and other warnings come after that. Source lines and log lines are labeled differently. A non-log file with either format exits 1.
-- Any other text file is summarized with LangChain when the format is human. Long files are split, partial summaries of `NONE` are dropped, and the rest are combined.
+- A timestamped log (at least five `timestamp LEVEL` records) becomes events. Python selects one primary incident, the lines related to it, and the independent events. With `--format human` (the default), one ChatOllama call narrates only the incident, under **Main failure** and **Related events**. Python appends **Other warnings** from the independent events. If the model returns no answer after the retry, those two narrative sections are filled from the extracted lines. A log that yields no events prints `No relevant errors or warnings were found.`
+- `--format agent` writes one Markdown incident brief from those same events. `--format json` writes that same incident as data, including `schema_version` and `analysis`. Unless `--no-llm` is set, `enrich_incident` asks the model for a failure mechanism, hypotheses, investigation steps, and regression scenarios. Python validates that reply and drops claims that cite unseen log lines or unseen paths and symbols. A confirmed correlation is not causation. If Ollama cannot be reached, or the reply is empty or invalid, the factual report is still written and stderr says enrichment failed. The Markdown brief leads with the executive summary and a Python-built task for a coding agent, then the failure, the labeled analysis, the observed facts, and the timeline. Stack text, raw excerpts, and other warnings come after that. Source lines and log lines are labeled differently. `evidence.possible_explanations` stays an empty list: the builder quotes logged facts and does not invent a cause. A log that yields no events still writes that document, with no primary failure. A non-log file with either format exits 1.
+- Any other text file is summarized with LangChain when the format is human. Long files are split, partial summaries of `NONE` are dropped, and the rest are combined. `--no-llm` on that path exits 1, because the summary requires the model.
 - An empty file prints `The file is empty.` A file containing a null byte is rejected.
 
 Do not strip the file before `extract_events`. Line numbers are 1-based and must match the source file.
@@ -32,7 +36,7 @@ Do not strip the file before `extract_events`. Line numbers are 1-based and must
 
 Keep this work in code. Do not ask the model to filter, group, or recover line numbers.
 
-`extract_events` walks the file once, then attaches context and groups incidents:
+`extract_events` walks the file once, then attaches context and groups incidents. Fewer than five `timestamp LEVEL` records returns None, and the file is summarized as ordinary text:
 
 - Keep `ERROR`, `FATAL`, and `CRITICAL`. Keep `WARN` unless it is a health check, skipped work, a not-found response, or a successful recovery. A warning is a recovery when a later line on its trace says the operation recovered.
 - Attach following stack lines to that event. Keep the exception line, `Caused by`, and the application frame. Drop Java, Python, Rust, Node.js, and .NET runtime frames. When a Python runtime `File` line is dropped, drop the source line under it too.

@@ -79,6 +79,7 @@ def build_evidence_package(report: IncidentReport, event: Event) -> EvidencePack
     """Compact, labeled evidence. Omitted lines are named as omitted, not analysed."""
     header = [
         f"incident_id: {report.incident_id}",
+        f"log_type: {'jenkins' if report.jenkins else 'application'}",
         f"exception: {report.exception or 'unknown'}",
         f"message: {report.message or 'none'}",
         f"timestamp: {report.timestamp or 'unknown'}",
@@ -86,11 +87,28 @@ def build_evidence_package(report: IncidentReport, event: Event) -> EvidencePack
         f"language: {report.language or 'unknown'}",
         f"framework: {report.framework or 'unknown'}",
         f"outcome: {report.outcome}",
-        "confirmed means a shared identifier, pid, or unit. It does not establish causation.",
-        "possible means the line is only nearby or shares a component name.",
-        "source_line is a line in an application file. log_line is a line in this log.",
-        "application_locations:",
     ]
+    if report.jenkins:
+        facts = report.jenkins
+        header.extend(
+            [
+                f"build_result: {facts.build_result or 'unknown'}",
+                f"failed_stage: {facts.failed_stage or 'unknown'}",
+                f"stage_association: {facts.stage_association or 'unknown'}",
+                f"failure_category: {facts.failure_category or 'unknown'}",
+                f"failed_command: {facts.failed_command or 'unknown'}",
+                f"exit_code: {facts.exit_code if facts.exit_code is not None else 'unknown'}",
+                "A Jenkins script exit or Finished line is a symptom when a diagnostic is present.",
+            ]
+        )
+    header.extend(
+        [
+            "confirmed means a shared identifier, pid, unit, stage, or command. It does not establish causation.",
+            "possible means the line is only nearby, shares a component name, or its stage is uncertain.",
+            "source_line is a line in an application file. log_line is a line in this log.",
+            "application_locations:",
+        ]
+    )
     if report.locations:
         for location in report.locations:
             header.append(

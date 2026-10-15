@@ -1,0 +1,36 @@
+Started by user casey
+Obtained Jenkinsfile from git https://github.com/example/northstar-service.git
+[Pipeline] Start of Pipeline
+[Pipeline] node
+Running on linux-node-07 in /var/lib/jenkins/workspace/northstar-service_main
+[Pipeline] {
+[Pipeline] stage
+[Pipeline] { (Checkout)
+[Pipeline] checkout
+The recommended git tool is: git
+ > git rev-parse --resolve-git-dir /var/lib/jenkins/workspace/northstar-service_main/.git # timeout=10
+Fetching changes from the remote Git repository
+ > git fetch --tags --force --progress -- https://github.com/example/northstar-service.git +refs/heads/*:refs/remotes/origin/* # timeout=10
+Checking out Revision 8c3d6f01b2b0af801fad131184690e87c0ab2194 (refs/remotes/origin/main)
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] stage
+[Pipeline] { (Test)
+[Pipeline] sh
++ npm test -- --ci
+npm info using npm@10.9.2
+npm info using node@v22.13.1
+
+> northstar-service@1.18.0 test
+> jest --ci
+
+Test Suites: 22 passed, 22 total
+Tests:       548 passed, 548 total
+Time:        16.931 s
+Ran all test suites.
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] }
+[Pipeline] // node
+[Pipeline] End of Pipeline
+Finished: SUCCESS

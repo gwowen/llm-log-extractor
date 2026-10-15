@@ -19,7 +19,8 @@ from ..models import (
 )
 
 _FILE_TOKEN = re.compile(
-    r"(?:[A-Za-z0-9_./\\-]+\.(?:java|py|go|rs|js|cs)|(?:[/\\][A-Za-z0-9_.-]+){2,})"
+    r"(?:[A-Za-z0-9_./\\-]+\.(?:java|py|go|rs|js|jsx|ts|tsx|cs|c|cc|cpp|h|hpp)|"
+    r"(?:[/\\][A-Za-z0-9_.-]+){2,})"
 )
 _SYMBOL_TOKEN = re.compile(r"\b[A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)+\b")
 
@@ -78,6 +79,18 @@ def _known_text(report: IncidentReport) -> str:
     parts = [location.path for location in report.locations]
     parts.extend(location.symbol for location in report.locations if location.symbol)
     parts.extend(record.text for record in report.lines)
+    if report.jenkins:
+        facts = report.jenkins
+        parts.extend(
+            part
+            for part in (
+                facts.failed_command,
+                facts.failed_stage,
+                facts.source_file,
+                facts.primary_message,
+            )
+            if part
+        )
     return "\n".join(parts)
 
 
@@ -100,7 +113,10 @@ def _symbol_tokens(text: str) -> list[str]:
         token = match.group(0)
         if token.lower() in {"node.js", "e.g", "i.e"}:
             continue
-        if any(token.endswith(suffix) for suffix in (".java", ".py", ".go", ".rs", ".js", ".cs")):
+        if any(
+            token.endswith(suffix)
+            for suffix in (".java", ".py", ".go", ".rs", ".js", ".jsx", ".ts", ".tsx", ".cs", ".cpp", ".cc")
+        ):
             continue
         if token not in found:
             found.append(token)

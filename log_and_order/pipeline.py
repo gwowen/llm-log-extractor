@@ -9,15 +9,18 @@ from ollama import ResponseError
 
 from .config import CHUNK_OVERLAP, CHUNK_SIZE, MODEL_NAME
 from .incidents.builder import build_incident_report
+from .incidents.jenkins import build_jenkins_report
 from .llm.client import GenerationError, build_llm
 from .llm.enrichment import disabled_enrichment, enrich_incident, fallback_enrichment
-from .llm.prompts import COMBINE_PROMPT, SUMMARIZE_PROMPT
+from .llm.prompts import COMBINE_PROMPT, JENKINS_REPORT_PROMPT, SUMMARIZE_PROMPT
 from .llm.summarization import interpret_events, summarize_chunks
 from .logs.extraction import extract_events
+from .logs.jenkins.analysis import JenkinsAnalysis, analyse_jenkins
 from .logs.selection import independent_events, select_primary
 from .models import Event, IncidentEnrichment
 from .reports.agent import render_agent_report
 from .reports.human import compose_report, fallback_narrative, fallback_report
+from .reports.jenkins import format_jenkins_model_input, render_jenkins_human
 from .reports.json import render_json_report
 
 
@@ -30,9 +33,13 @@ def format_agent_report(
     text: str,
     events: list[Event],
     enrichment: IncidentEnrichment | None = None,
+    jenkins: JenkinsAnalysis | None = None,
 ) -> str:
     """Markdown brief for a developer and for a coding agent. One incident, told once."""
-    report = build_incident_report(path, text, events)
+    if jenkins is not None:
+        report = build_jenkins_report(path, jenkins)
+    else:
+        report = build_incident_report(path, text, events)
     return render_agent_report(report, enrichment or disabled_enrichment())
 
 
@@ -41,9 +48,13 @@ def format_json_report(
     text: str,
     events: list[Event],
     enrichment: IncidentEnrichment | None = None,
+    jenkins: JenkinsAnalysis | None = None,
 ) -> str:
     """The same incident as the Markdown brief, as JSON."""
-    report = build_incident_report(path, text, events)
+    if jenkins is not None:
+        report = build_jenkins_report(path, jenkins)
+    else:
+        report = build_incident_report(path, text, events)
     return render_json_report(report, enrichment or disabled_enrichment())
 
 
@@ -55,10 +66,15 @@ def _agent_or_json(
     *,
     use_llm: bool,
     model: str | None,
+    jenkins: JenkinsAnalysis | None = None,
 ) -> str:
     """One incident document. The model is optional and cannot replace the facts."""
-    report = build_incident_report(path, text, events)
-    primary = select_primary(events)
+    if jenkins is not None:
+        report = build_jenkins_report(path, jenkins)
+        primary = jenkins.primary_event
+    else:
+        report = build_incident_report(path, text, events)
+        primary = select_primary(events)
     if not use_llm:
         enrichment = disabled_enrichment()
     elif primary is None:
@@ -86,14 +102,24 @@ def summarize(
     use_llm: bool = True,
     model: str | None = None,
 ) -> str:
-    """Report a timestamped log, or summarize other text.
+    """Report a Jenkins console or a timestamped log, or summarize other text.
 
+    Jenkins is detected first, including consoles that have no timestamps.
     The human log path extracts events here and asks the model only to narrate
     them. Agent and JSON reports use the same events and, unless use_llm is
     false, add a validated diagnostic analysis. Fewer than five timestamped
-    records is treated as ordinary text.
+    records, and a file that is not Jenkins, is treated as ordinary text.
     """
     chosen = model or MODEL_NAME
+    jenkins = analyse_jenkins(text)
+    if jenkins is not None:
+        return _summarize_jenkins(
+            path,
+            jenkins,
+            report_format,
+            use_llm=use_llm,
+            model=model,
+        )
     events = extract_events(text)
     if events is not None:
         # A timestamped log with nothing kept still has a path: human says so in one line,
@@ -141,3 +167,46 @@ def summarize(
         combine_prompt=COMBINE_PROMPT,
         llm=llm,
     )
+
+
+def _summarize_jenkins(
+    path: Path,
+    jenkins: JenkinsAnalysis,
+    report_format: str,
+    *,
+    use_llm: bool,
+    model: str | None,
+) -> str:
+    """Report a Jenkins console log through the same human, agent, and JSON outputs."""
+    print(
+        f"Extracted {len(jenkins.events)} events from {len(jenkins.lines)} lines.",
+        file=sys.stderr,
+    )
+    if report_format in {"agent", "json"}:
+        return _agent_or_json(
+            path,
+            "",
+            jenkins.events,
+            report_format,
+            use_llm=use_llm,
+            model=model,
+            jenkins=jenkins,
+        )
+    report = build_jenkins_report(path, jenkins)
+    if jenkins.primary_event is None or not use_llm:
+        return render_jenkins_human(report)
+    try:
+        narrative = interpret_events(
+            path,
+            jenkins.primary_event,
+            model,
+            prompt=JENKINS_REPORT_PROMPT,
+            incident_text=format_jenkins_model_input(jenkins),
+        )
+    except GenerationError:
+        print(
+            "The model did not produce a summary. Using the extracted events.",
+            file=sys.stderr,
+        )
+        narrative = None
+    return render_jenkins_human(report, narrative)

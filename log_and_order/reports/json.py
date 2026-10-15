@@ -8,6 +8,7 @@ from ..config import (
 from ..models import (
     IncidentEnrichment,
     IncidentReport,
+    JenkinsFacts,
 )
 
 
@@ -24,6 +25,36 @@ def _analysis_payload(enrichment: IncidentEnrichment) -> dict:
         "regression_tests": [asdict(item) for item in enrichment.regression_tests],
         "additional_unknowns": enrichment.additional_unknowns,
     }
+
+def _jenkins_payload(facts: JenkinsFacts) -> dict:
+    """Jenkins fields. Source line and log line stay in different places."""
+    primary = None
+    if facts.primary_message is not None:
+        primary = {
+            "message": facts.primary_message,
+            "category": facts.failure_category,
+            "source_file": facts.source_file,
+            "source_line": facts.source_line,
+            "source_column": facts.source_column,
+            "log_lines": facts.log_lines,
+            "symptom": facts.symptom,
+        }
+    return {
+        "log_type": "jenkins",
+        "job_style": facts.job_style,
+        "build_result": facts.build_result,
+        "failed_stage": facts.failed_stage,
+        "stage_association": facts.stage_association,
+        "possible_stages": facts.possible_stages,
+        "failure_category": facts.failure_category,
+        "failed_command": facts.failed_command,
+        "exit_code": facts.exit_code,
+        "primary_failure": primary,
+        "candidates": [asdict(item) for item in facts.candidates],
+        "investigation_targets": facts.investigation_targets,
+        "suggested_actions": facts.suggested_actions,
+    }
+
 
 def render_json_report(report: IncidentReport, enrichment: IncidentEnrichment) -> str:
     """The same incident and the same analysis object as the Markdown brief."""
@@ -54,4 +85,6 @@ def render_json_report(report: IncidentReport, enrichment: IncidentEnrichment) -
         "analysis": _analysis_payload(enrichment),
         "other_warnings": report.other_warnings,
     }
+    if report.jenkins is not None:
+        payload["jenkins"] = _jenkins_payload(report.jenkins)
     return json.dumps(payload, indent=2) + "\n"

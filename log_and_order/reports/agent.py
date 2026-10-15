@@ -3,6 +3,7 @@
 from ..models import (
     IncidentEnrichment,
     IncidentReport,
+    JenkinsFacts,
     ReportLocation,
 )
 from ..incidents.builder import (
@@ -51,7 +52,10 @@ def _task_lines(report: IncidentReport, enrichment: IncidentEnrichment) -> list[
     ]
     if named:
         lines.append("Logged application locations: " + "; ".join(named) + ".")
-    lines.append(_impact_sentence(report.outcome))
+    if report.jenkins:
+        lines.append(_jenkins_task_sentence(report.jenkins))
+    else:
+        lines.append(_impact_sentence(report.outcome))
     lines.append("")
     lines.append(
         "Hypotheses in this report are model interpretations, not facts. "
@@ -105,6 +109,58 @@ def _task_lines(report: IncidentReport, enrichment: IncidentEnrichment) -> list[
         )
     lines.append("7. Run relevant existing tests when the environment permits.")
     lines.append("8. Explain the verified root cause, the modifications, and the validation results.")
+    return lines
+
+
+def _jenkins_task_sentence(facts: JenkinsFacts) -> str:
+    """Where the console log places the failure. This is not a confirmed cause."""
+    result = facts.build_result or "unknown"
+    if facts.primary_message is None:
+        return f"The Jenkins build result is {result}. No primary failure was identified."
+    stage = facts.failed_stage or "an unidentified stage"
+    if facts.stage_association == "uncertain":
+        stage = "a stage the interleaved output did not identify"
+    command = f" The failed command is `{facts.failed_command}`." if facts.failed_command else ""
+    category = facts.failure_category or "UNKNOWN"
+    return (
+        f"The Jenkins build result is {result}. "
+        f"The extracted failure is category {category} in {stage}.{command}"
+    )
+
+
+def _jenkins_lines(facts: JenkinsFacts) -> list[str]:
+    """Structured Jenkins fields. Missing values are left out."""
+    lines = ["## Jenkins build", ""]
+    if facts.build_result:
+        lines.append(f"- Build result: {facts.build_result}")
+    if facts.stage_association == "uncertain":
+        names = ", ".join(facts.possible_stages) if facts.possible_stages else "unknown"
+        lines.append(f"- Failed stage: uncertain (open stages: {names})")
+    elif facts.failed_stage:
+        lines.append(f"- Failed stage: {facts.failed_stage}")
+    if facts.failure_category:
+        lines.append(f"- Failure category: {facts.failure_category}")
+    if facts.failed_command:
+        lines.append(f"- Failed command: `{facts.failed_command}`")
+    if facts.exit_code is not None:
+        lines.append(f"- Exit code: {facts.exit_code}")
+    if facts.source_file:
+        place = facts.source_file
+        if facts.source_line:
+            place = f"{place} source line {facts.source_line}"
+        log_line = facts.log_lines[0] if facts.log_lines else None
+        cited = f" Log line {log_line}." if log_line else ""
+        lines.append(f"- Source: `{place}`.{cited}")
+    if facts.symptom:
+        lines.append("- The primary line is a Jenkins status. A more specific cause was not extracted.")
+    if facts.suggested_actions:
+        lines.append("- Investigation suggested from the extracted evidence:")
+        lines.extend(f"  - {action}" for action in facts.suggested_actions)
+    lines.append("")
+    lines.append(
+        "These fields are extracted from the console log. "
+        "A stage or a command shows where a line was printed. It does not prove causation."
+    )
     return lines
 
 
@@ -266,6 +322,7 @@ def render_agent_report(report: IncidentReport, enrichment: IncidentEnrichment) 
         "",
         report.summary,
         "",
+        *([*_jenkins_lines(report.jenkins), ""] if report.jenkins else []),
         *_task_lines(report, enrichment),
         "",
         *failure_lines,

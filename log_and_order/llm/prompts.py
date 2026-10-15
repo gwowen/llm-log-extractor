@@ -62,6 +62,30 @@ REPORT_PROMPT = ChatPromptTemplate.from_messages(
     ]
 )
 
+# Narrates one Jenkins incident Python already extracted. Suggested investigation is added later.
+JENKINS_REPORT_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You explain one Jenkins build failure from lines that were already extracted. "
+            "Write exactly these headings, in this order:\n"
+            "Root cause\n"
+            "Related symptoms\n"
+            "Under Root cause, say what failed, where, and why the extracted lines support that. "
+            "A script exit code or Finished line is a symptom when a more specific diagnostic is shown. "
+            "Under Related symptoms, describe the later Jenkins status lines. "
+            "Cite log line numbers like (line 184). "
+            "Cite only line numbers that appear below. "
+            "source_line is a line in an application file. A log line is a line in this log. "
+            "Do not invent line numbers, files, stages, commands, or a cause the lines do not state. "
+            "Do not suggest a fix. "
+            "If the stage association is uncertain, do not name a stage. "
+            "If a section has no lines, write None under that heading.",
+        ),
+        ("human", "File: {source}\n\nIncident:\n\n{text}"),
+    ]
+)
+
 # Structured diagnostic analysis for agent and JSON reports. Not the human narrative.
 ENRICH_PROMPT = ChatPromptTemplate.from_messages(
     [
@@ -84,6 +108,8 @@ ENRICH_PROMPT = ChatPromptTemplate.from_messages(
             "Do not invent files, symbols, source line numbers, repositories, fixes, "
             "test filenames, frameworks, or commands. "
             "supporting_log_lines must be log_line values from the evidence. "
+            "When log_type is jenkins, a script exit code or a Finished line is a symptom "
+            "if a more specific diagnostic is present. Do not treat that symptom as the cause. "
             "If the evidence does not support a hypothesis, return an empty hypotheses list. "
             "Return at most 3 hypotheses and 5 investigation_steps. "
             "Keep every string under 400 characters. "

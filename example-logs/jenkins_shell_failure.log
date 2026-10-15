@@ -1,0 +1,19 @@
+Started by user casey
+[Pipeline] Start of Pipeline
+[Pipeline] node
+Running on linux-node-07 in /var/lib/jenkins/workspace/payments-migrate
+[Pipeline] {
+[Pipeline] stage
+[Pipeline] { (Migrate)
+[Pipeline] sh
++ ./scripts/migrate.sh --token=supersecretvalue
+AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+Authorization: Bearer supersecrettoken
+./scripts/migrate.sh: line 3: migrate: command not found
+[31mERROR: script returned exit code 127[0m
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] }
+[Pipeline] // node
+[Pipeline] End of Pipeline
+Finished: FAILURE

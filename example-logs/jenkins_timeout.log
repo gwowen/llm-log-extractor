@@ -1,0 +1,25 @@
+Started by timer
+[Pipeline] Start of Pipeline
+[Pipeline] node
+Running on linux-node-07 in /var/lib/jenkins/workspace/nightly-import
+[Pipeline] {
+[Pipeline] timeout
+Timeout set to expire in 1 min
+[Pipeline] {
+[Pipeline] stage
+[Pipeline] { (Import)
+[Pipeline] sh
++ python import_batch.py --since yesterday
+2026 batch 1 accepted
+2026 batch 2 accepted
+2026 batch 3 accepted
+Cancelling nested steps due to timeout
+org.jenkinsci.plugins.workflow.steps.TimeoutStepExecution$ExceededTimeout
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] }
+[Pipeline] // timeout
+[Pipeline] }
+[Pipeline] // node
+[Pipeline] End of Pipeline
+Finished: ABORTED

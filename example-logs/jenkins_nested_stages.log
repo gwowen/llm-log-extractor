@@ -1,0 +1,34 @@
+Started by user casey
+[Pipeline] Start of Pipeline
+[Pipeline] node
+Running on linux-node-07 in /var/lib/jenkins/workspace/release-train
+[Pipeline] {
+[Pipeline] stage
+[Pipeline] { (Release)
+[Pipeline] echo
+Preparing the release artifacts
+[Pipeline] stage
+[Pipeline] { (Package)
+[Pipeline] sh
++ python -m build
+* Creating isolated environment: venv+pip...
+* Installing packages in isolated environment:
+  - setuptools>=61
+  - wheel
+error: subprocess-exited-with-error
+Getting requirements to build wheel did not run successfully.
+exit code: 1
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] stage
+[Pipeline] { (Publish)
+Stage "Publish" skipped due to earlier failure(s)
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] }
+[Pipeline] // node
+[Pipeline] End of Pipeline
+ERROR: script returned exit code 1
+Finished: FAILURE

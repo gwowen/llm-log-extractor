@@ -10,8 +10,10 @@ from ollama import ResponseError
 from .config import MODEL_NAME
 from .llm.client import GenerationError
 from .logs.extraction import extract_events
+from .logs.jenkins.analysis import analyse_jenkins
 from .pipeline import FormatError, summarize
 from .reports.human import dump_events
+from .reports.jenkins import dump_jenkins
 
 
 def read_file(path: Path) -> str:
@@ -92,6 +94,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.dump_events:
         # Dump ignores --format. It shows the human-report model input.
+        jenkins = analyse_jenkins(text)
+        if jenkins is not None:
+            try:
+                publish(dump_jenkins(jenkins), args.output)
+            except OSError as exc:
+                print(f"Could not write {args.output}: {exc}", file=sys.stderr)
+                return 1
+            return 0
         events = extract_events(text)
         if events is None:
             publish("Not a timestamped log.", args.output)

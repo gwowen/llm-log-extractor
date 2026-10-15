@@ -1,0 +1,14 @@
+Started by user casey
+[Pipeline] Start of Pipeline
+[Pipeline] node
+Running on linux-node-07 in /var/lib/jenkins/workspace/billing-api
+[Pipeline] {
+[Pipeline] stage
+[Pipeline] { (Build)
+[Pipeline] sh
++ npm run build
+> billing-api@2.4.0 build
+> tsc -p tsconfig.build.json
+[build] compiling src/server/file_001.ts
+[build] compiling src/server/file_002.ts
+src/server.ts:42:13 - error TS2322: Type 'string' is not assignable to type 'number'.

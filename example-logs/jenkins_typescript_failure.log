@@ -1,0 +1,46 @@
+Started by an SCM change
+[Pipeline] Start of Pipeline
+[Pipeline] node
+Running on linux-node-07 in /var/lib/jenkins/workspace/billing-api
+[Pipeline] {
+[Pipeline] stage
+[Pipeline] { (Install)
+[Pipeline] sh
++ npm ci --no-audit
+npm http fetch GET 200 https://registry.npmjs.org/typescript 67ms (cache hit)
+npm http fetch GET 200 https://registry.npmjs.org/vite 20ms (cache hit)
+npm info using npm@10.9.2
+added 412 packages in 9s
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] stage
+[Pipeline] { (Build)
+[Pipeline] sh
++ npm run build
+> billing-api@2.4.0 build
+> tsc -p tsconfig.build.json
+
+[build] compiling src/server/file_001.ts (1/40)
+[build] compiling src/server/file_002.ts (2/40)
+[build] compiling src/api/file_003.ts (3/40)
+[build] note: core package emits declaration files; this is informational
+src/server.ts:42:13 - error TS2322: Type 'string' is not assignable to type 'number'.
+
+42     const port: number = config.portName;
+               ~~~~
+
+Found 1 error in src/server.ts:42
+npm verbose cwd /var/lib/jenkins/workspace/billing-api
+npm verbose exit 2
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] stage
+[Pipeline] { (Deploy)
+Stage "Deploy" skipped due to earlier failure(s)
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] }
+[Pipeline] // node
+[Pipeline] End of Pipeline
+ERROR: script returned exit code 2
+Finished: FAILURE

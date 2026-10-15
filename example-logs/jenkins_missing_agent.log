@@ -1,0 +1,9 @@
+Started by user jordan
+[Pipeline] Start of Pipeline
+[Pipeline] node
+Still waiting to schedule task
+Waiting for next available executor
+‘linux-builders’ is offline
+There are no nodes with the label ‘linux-builders’
+[Pipeline] End of Pipeline
+Finished: FAILURE

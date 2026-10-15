@@ -5,13 +5,24 @@ import json
 import re
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 import httpx
 
-import main
+from log_and_order.cli import main
+from log_and_order.config import EVIDENCE_BUDGET
+from log_and_order.incidents.builder import build_incident_report
+from log_and_order.llm.enrichment import build_evidence_package, enrich_incident
+from log_and_order.llm.validation import _validate_enrichment
+from log_and_order.logs.extraction import extract_events
+from log_and_order.logs.selection import select_primary
+from log_and_order.models import Event, EvidencePackage, IncidentReport
+from log_and_order.pipeline import format_json_report, summarize
+from log_and_order.reports.agent import render_agent_report
+from log_and_order.reports.json import render_json_report
+
 
 ROOT = Path(__file__).resolve().parents[1]
 LOGS = ROOT / "example-logs"
@@ -23,6 +34,15 @@ FIXTURES = (
     "nodejs_express_crash_noisy.log",
     "aspnet_core_crash_noisy.log",
 )
+
+
+@contextmanager
+def patch_llm(*args, **kwargs):
+    """Patch both the report path and the enrichment retry."""
+    with ExitStack() as stack:
+        mocked = stack.enter_context(patch("log_and_order.pipeline.build_llm", *args, **kwargs))
+        stack.enter_context(patch("log_and_order.llm.enrichment.build_llm", *args, **kwargs))
+        yield mocked
 
 
 class Reply:
@@ -123,12 +143,12 @@ def honest_reply(text: str) -> str:
     )
 
 
-def package_for(name: str) -> tuple[str, main.IncidentReport, main.Event]:
+def package_for(name: str) -> tuple[str, IncidentReport, Event]:
     text = (LOGS / name).read_text()
-    events = main.extract_events(text)
+    events = extract_events(text)
     assert events is not None
-    report = main.build_incident_report(Path(name), text, events)
-    primary = main.select_primary(events)
+    report = build_incident_report(Path(name), text, events)
+    primary = select_primary(events)
     assert primary is not None
     return text, report, primary
 
@@ -147,9 +167,9 @@ def facts(payload: dict) -> dict:
 class ValidationTest(unittest.TestCase):
     def test_valid_json_keeps_cited_lines_and_drops_invented_names(self) -> None:
         _, report, event = package_for("spring_boot_incident_noise.log")
-        package = main.build_evidence_package(report, event)
+        package = build_evidence_package(report, event)
         payload = json.loads(honest_reply(package.text))
-        result = main._validate_enrichment(payload, package, "fake-model", event.seed.number)
+        result = _validate_enrichment(payload, package, "fake-model", event.seed.number)
         self.assertTrue(result.enriched)
         self.assertFalse(result.fallback)
         self.assertEqual(len(result.hypotheses), 1)
@@ -159,7 +179,7 @@ class ValidationTest(unittest.TestCase):
         self.assertNotIn("/tmp/not-in-the-log.java", result.hypotheses[0].description)
 
     def test_fabricated_log_line_is_removed(self) -> None:
-        package = main.EvidencePackage(
+        package = EvidencePackage(
             text="incident",
             allowed_lines={20},
             correlations={20: "failure"},
@@ -179,11 +199,11 @@ class ValidationTest(unittest.TestCase):
                 }
             ],
         }
-        result = main._validate_enrichment(payload, package, "fake-model", 20)
+        result = _validate_enrichment(payload, package, "fake-model", 20)
         self.assertEqual(result.hypotheses[0].supporting_log_lines, [20])
 
     def test_only_fabricated_lines_reject_the_document(self) -> None:
-        package = main.EvidencePackage(
+        package = EvidencePackage(
             text="incident",
             allowed_lines={20},
             correlations={20: "failure"},
@@ -202,14 +222,14 @@ class ValidationTest(unittest.TestCase):
                 }
             ]
         }
-        result = main._validate_enrichment(payload, package, "fake-model", 20)
+        result = _validate_enrichment(payload, package, "fake-model", 20)
         self.assertTrue(result.fallback)
         self.assertFalse(result.enriched)
         self.assertEqual(result.hypotheses, [])
         self.assertIsNone(result.failure_mechanism)
 
     def test_invented_path_and_symbol_are_dropped(self) -> None:
-        package = main.EvidencePackage(
+        package = EvidencePackage(
             text="incident",
             allowed_lines={20},
             correlations={20: "failure"},
@@ -229,13 +249,13 @@ class ValidationTest(unittest.TestCase):
                 }
             ],
         }
-        result = main._validate_enrichment(payload, package, "fake-model", 20)
+        result = _validate_enrichment(payload, package, "fake-model", 20)
         self.assertTrue(result.fallback)
         self.assertIsNone(result.failure_mechanism)
         self.assertEqual(result.hypotheses, [])
 
     def test_high_confidence_on_possible_lines_is_lowered(self) -> None:
-        package = main.EvidencePackage(
+        package = EvidencePackage(
             text="incident",
             allowed_lines={10, 20},
             correlations={10: "possible", 20: "failure"},
@@ -250,7 +270,7 @@ class ValidationTest(unittest.TestCase):
             "missing_evidence": [],
             "verification": "Compare the nearby line with App.java.",
         }
-        result = main._validate_enrichment(
+        result = _validate_enrichment(
             {"hypotheses": [possible]},
             package,
             "fake-model",
@@ -259,7 +279,7 @@ class ValidationTest(unittest.TestCase):
         self.assertEqual(result.hypotheses[0].confidence, "low")
 
     def test_missing_fields_drop_that_claim_only(self) -> None:
-        package = main.EvidencePackage(
+        package = EvidencePackage(
             text="incident",
             allowed_lines={20},
             correlations={20: "confirmed"},
@@ -280,20 +300,20 @@ class ValidationTest(unittest.TestCase):
                 },
             ],
         }
-        result = main._validate_enrichment(payload, package, "fake-model", 20)
+        result = _validate_enrichment(payload, package, "fake-model", 20)
         self.assertTrue(result.enriched)
         self.assertEqual(len(result.hypotheses), 1)
         self.assertIn("confirmed line", result.hypotheses[0].description)
 
     def test_empty_object_is_still_enriched(self) -> None:
-        package = main.EvidencePackage(
+        package = EvidencePackage(
             text="incident",
             allowed_lines=set(),
             correlations={},
             known_text="",
             omitted=0,
         )
-        result = main._validate_enrichment({}, package, "fake-model", 1)
+        result = _validate_enrichment({}, package, "fake-model", 1)
         self.assertTrue(result.enriched)
         self.assertFalse(result.fallback)
         self.assertEqual(result.hypotheses, [])
@@ -303,8 +323,8 @@ class ValidationTest(unittest.TestCase):
         _, report, event = package_for("gin_web_crash_noisy.log")
         fake = FakeModel(["{not json", "still not json"])
         stderr = io.StringIO()
-        with patch("main.build_llm", return_value=fake), redirect_stderr(stderr):
-            result = main.enrich_incident(report, event, fake)
+        with patch("log_and_order.llm.enrichment.build_llm", return_value=fake), redirect_stderr(stderr):
+            result = enrich_incident(report, event, fake)
         self.assertEqual(result.reason, "invalid")
         self.assertTrue(result.fallback)
         self.assertEqual(result.hypotheses, [])
@@ -315,16 +335,16 @@ class ValidationTest(unittest.TestCase):
         _, report, event = package_for("actix_web_crash_noisy.log")
         fake = FakeModel(["<think>only a trace</think>", "<think>still thinking</think>"])
         stderr = io.StringIO()
-        with patch("main.build_llm", return_value=fake), redirect_stderr(stderr):
-            result = main.enrich_incident(report, event, fake)
+        with patch("log_and_order.llm.enrichment.build_llm", return_value=fake), redirect_stderr(stderr):
+            result = enrich_incident(report, event, fake)
         self.assertEqual(result.reason, "invalid")
         self.assertIsNone(result.failure_mechanism)
         self.assertIn("thinking trace", stderr.getvalue())
 
     def test_wrong_field_types_are_rejected(self) -> None:
-        package = main.EvidencePackage("incident", set(), {}, "", 0)
+        package = EvidencePackage("incident", set(), {}, "", 0)
         self.assertIsNone(
-            main._validate_enrichment({"hypotheses": "nope"}, package, "fake-model", 1)
+            _validate_enrichment({"hypotheses": "nope"}, package, "fake-model", 1)
         )
 
 
@@ -333,9 +353,9 @@ class ReportIntegrationTest(unittest.TestCase):
         for name in FIXTURES:
             with self.subTest(name=name):
                 text, report, _event = package_for(name)
-                events = main.extract_events(text)
+                events = extract_events(text)
                 assert events is not None
-                before = json.loads(main.format_json_report(Path(name), text, events))
+                before = json.loads(format_json_report(Path(name), text, events))
                 fake = FakeModel(
                     [
                         json.dumps(
@@ -356,8 +376,8 @@ class ReportIntegrationTest(unittest.TestCase):
                     ]
                     * 2
                 )
-                with patch("main.build_llm", return_value=fake), redirect_stderr(io.StringIO()):
-                    rendered = main.summarize(Path(name), text, "json")
+                with patch_llm(return_value=fake), redirect_stderr(io.StringIO()):
+                    rendered = summarize(Path(name), text, "json")
                 payload = json.loads(rendered)
                 self.assertEqual(facts(payload), facts(before))
                 self.assertTrue(payload["analysis"]["fallback"])
@@ -367,15 +387,15 @@ class ReportIntegrationTest(unittest.TestCase):
 
     def test_markdown_and_json_share_one_analysis(self) -> None:
         text, report, event = package_for("aspnet_core_crash_noisy.log")
-        package = main.build_evidence_package(report, event)
-        enrichment = main._validate_enrichment(
+        package = build_evidence_package(report, event)
+        enrichment = _validate_enrichment(
             json.loads(honest_reply(package.text)),
             package,
             "fake-model",
             event.seed.number,
         )
-        markdown = main.render_agent_report(report, enrichment)
-        payload = json.loads(main.render_json_report(report, enrichment))
+        markdown = render_agent_report(report, enrichment)
+        payload = json.loads(render_json_report(report, enrichment))
         description = enrichment.hypotheses[0].description
         self.assertIn(description, markdown)
         self.assertEqual(payload["analysis"]["hypotheses"][0]["description"], description)
@@ -397,8 +417,8 @@ class ReportIntegrationTest(unittest.TestCase):
         text = (LOGS / "django_rest_crash_noisy.log").read_text()
         fake = FakeModel([httpx.ConnectError("refused")])
         stderr = io.StringIO()
-        with patch("main.build_llm", return_value=fake), redirect_stderr(stderr):
-            rendered = main.summarize(Path("django.log"), text, "json")
+        with patch_llm(return_value=fake), redirect_stderr(stderr):
+            rendered = summarize(Path("django.log"), text, "json")
         payload = json.loads(rendered)
         self.assertEqual(payload["incident"]["exception"], "ModuleNotFoundError")
         self.assertEqual(payload["analysis"]["reason"], "unavailable")
@@ -407,11 +427,25 @@ class ReportIntegrationTest(unittest.TestCase):
         self.assertIn("Enrichment failed", stderr.getvalue())
         self.assertIn("declared as a dependency", " ".join(payload["evidence"]["unknowns"]))
 
+    def test_non_log_text_is_summarized_in_chunks(self) -> None:
+        from log_and_order.llm.prompts import COMBINE_PROMPT, SUMMARIZE_PROMPT
+
+        text = "A meeting note without timestamps.\nIt still has two lines.\n"
+        with (
+            patch("log_and_order.pipeline.build_llm", return_value=object()) as built,
+            patch("log_and_order.pipeline.summarize_chunks", return_value="Combined.") as chunks,
+        ):
+            rendered = summarize(Path("notes.txt"), text, "human")
+        self.assertEqual(rendered, "Combined.")
+        built.assert_called_once()
+        self.assertIs(chunks.call_args.kwargs["piece_prompt"], SUMMARIZE_PROMPT)
+        self.assertIs(chunks.call_args.kwargs["combine_prompt"], COMBINE_PROMPT)
+
     def test_no_llm_skips_the_model(self) -> None:
         text = (LOGS / "gin_web_crash_noisy.log").read_text()
         stderr = io.StringIO()
-        with patch("main.build_llm", side_effect=AssertionError("model called")), redirect_stderr(stderr):
-            rendered = main.summarize(Path("gin.log"), text, "agent", use_llm=False)
+        with patch_llm(side_effect=AssertionError("model called")), redirect_stderr(stderr):
+            rendered = summarize(Path("gin.log"), text, "agent", use_llm=False)
         self.assertIn("No model hypotheses were produced.", rendered)
         self.assertIn("No model analysis was produced.", rendered)
         self.assertIn("panic", rendered)
@@ -421,8 +455,8 @@ class ReportIntegrationTest(unittest.TestCase):
     def test_no_primary_failure_does_not_call_the_model(self) -> None:
         lines = [f"2026-10-15T00:00:0{index}Z WARN disk: usage high mount=/data value={index}" for index in range(5)]
         text = "\n".join(lines) + "\n"
-        with patch("main.build_llm", side_effect=AssertionError("model called")):
-            rendered = main.summarize(Path("quiet.log"), text, "json", use_llm=True)
+        with patch_llm(side_effect=AssertionError("model called")):
+            rendered = summarize(Path("quiet.log"), text, "json", use_llm=True)
         payload = json.loads(rendered)
         self.assertIsNone(payload["incident"]["id"])
         self.assertEqual(payload["incident"]["outcome"], "none")
@@ -440,8 +474,8 @@ class ReportIntegrationTest(unittest.TestCase):
             ]
         )
         fake = FakeModel(["{not json", "also not json"])
-        with patch("main.build_llm", return_value=fake), redirect_stderr(io.StringIO()):
-            payload = json.loads(main.summarize(Path("two.log"), text, "json"))
+        with patch_llm(return_value=fake), redirect_stderr(io.StringIO()):
+            payload = json.loads(summarize(Path("two.log"), text, "json"))
         self.assertEqual(payload["incident"]["exception"], "java.lang.IllegalStateException")
         warnings = json.dumps(payload["other_warnings"])
         self.assertIn("NullPointerException", warnings)
@@ -462,13 +496,13 @@ class ReportIntegrationTest(unittest.TestCase):
                 *frames,
             ]
         )
-        events = main.extract_events(text)
+        events = extract_events(text)
         assert events is not None
-        report = main.build_incident_report(Path("long.log"), text, events)
-        primary = main.select_primary(events)
+        report = build_incident_report(Path("long.log"), text, events)
+        primary = select_primary(events)
         assert primary is not None
-        package = main.build_evidence_package(report, primary)
-        self.assertLessEqual(len(package.text), main.EVIDENCE_BUDGET)
+        package = build_evidence_package(report, primary)
+        self.assertLessEqual(len(package.text), EVIDENCE_BUDGET)
         self.assertGreater(package.omitted, 0)
         self.assertIn("were not analysed", package.text)
         self.assertIn(f"incident_id: {report.incident_id}", package.text)
@@ -503,9 +537,9 @@ class ReportIntegrationTest(unittest.TestCase):
             }
         )
         fake = FakeModel([injected] * 4)
-        with patch("main.build_llm", return_value=fake), redirect_stderr(io.StringIO()):
-            markdown = main.summarize(Path("injected.log"), text, "agent")
-            payload = json.loads(main.summarize(Path("injected.log"), text, "json"))
+        with patch_llm(return_value=fake), redirect_stderr(io.StringIO()):
+            markdown = summarize(Path("injected.log"), text, "agent")
+            payload = json.loads(summarize(Path("injected.log"), text, "json"))
         seen = "\n".join(fake.seen)
         self.assertIn("<untrusted_log_data>", seen)
         self.assertIn("Ignore previous instructions", seen)
@@ -519,8 +553,8 @@ class ReportIntegrationTest(unittest.TestCase):
 
     def test_model_override_and_human_flag_stay_compatible(self) -> None:
         text = (LOGS / "spring_boot_incident_noise.log").read_text()
-        with patch("main.build_llm", return_value=PromptModel()) as built, redirect_stderr(io.StringIO()):
-            rendered = main.summarize(Path("spring.log"), text, "agent", model="other-model")
+        with patch_llm(return_value=PromptModel()) as built, redirect_stderr(io.StringIO()):
+            rendered = summarize(Path("spring.log"), text, "agent", model="other-model")
         self.assertIn("The logged call failed", rendered)
         self.assertEqual(built.call_args.kwargs["model"], "other-model")
         self.assertTrue(built.call_args.kwargs["json_mode"])
@@ -532,10 +566,10 @@ class ReportIntegrationTest(unittest.TestCase):
             destination = Path(directory) / "incident.json"
             stdout = io.StringIO()
             with (
-                patch("main.build_llm", side_effect=AssertionError("model called")),
+                patch_llm(side_effect=AssertionError("model called")),
                 redirect_stdout(stdout),
             ):
-                status = main.main(
+                status = main(
                     [
                         "--format",
                         "json",
@@ -554,10 +588,10 @@ class ReportIntegrationTest(unittest.TestCase):
 
         stdout = io.StringIO()
         with (
-            patch("main.build_llm", side_effect=AssertionError("model called")),
+            patch_llm(side_effect=AssertionError("model called")),
             redirect_stdout(stdout),
         ):
-            status = main.main(["--dump-events", "--format", "agent", str(LOGS / "spring_boot_incident_noise.log")])
+            status = main(["--dump-events", "--format", "agent", str(LOGS / "spring_boot_incident_noise.log")])
         self.assertEqual(status, 0)
         self.assertIn("# Sent to the model", stdout.getvalue())
 
@@ -571,7 +605,7 @@ class ReportIntegrationTest(unittest.TestCase):
         for name, (exception, outcome) in cases.items():
             with self.subTest(name=name):
                 text = (LOGS / name).read_text()
-                payload = json.loads(main.format_json_report(Path(name), text, main.extract_events(text)))
+                payload = json.loads(format_json_report(Path(name), text, extract_events(text)))
                 self.assertEqual(payload["incident"]["exception"], exception)
                 self.assertEqual(payload["incident"]["outcome"], outcome)
                 self.assertTrue(payload["locations"])

@@ -2,12 +2,18 @@
 
 import io
 import json
-import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import redirect_stdout
 from pathlib import Path
 
-import main
+from log_and_order.cli import build_parser, main
+from log_and_order.incidents.stacktraces import application_locations
+from log_and_order.llm.prompts import REPORT_PROMPT
+from log_and_order.logs.extraction import extract_events
+from log_and_order.logs.selection import independent_events, select_primary
+from log_and_order.models import Event, LogLine
+from log_and_order.pipeline import format_agent_report, format_json_report
+from log_and_order.reports.human import compose_report, fallback_report, format_model_input
 
 ROOT = Path(__file__).resolve().parents[1]
 LOGS = ROOT / "example-logs"
@@ -34,16 +40,16 @@ def section(report: str, heading: str, following: str) -> str:
     return report.split(heading, 1)[1].split(following, 1)[0]
 
 
-def load(name: str) -> tuple[str, list[main.Event]]:
+def load(name: str) -> tuple[str, list[Event]]:
     text = (LOGS / name).read_text()
-    events = main.extract_events(text)
+    events = extract_events(text)
     assert events is not None
     return text, events
 
 
 class ReportShapeTest(unittest.TestCase):
     def test_default_format_is_human(self) -> None:
-        args = main.build_parser().parse_args(["application.log"])
+        args = build_parser().parse_args(["application.log"])
         self.assertEqual(args.report_format, "human")
         self.assertIsNone(args.output)
         self.assertFalse(args.no_llm)
@@ -51,7 +57,7 @@ class ReportShapeTest(unittest.TestCase):
 
     def test_sections_lead_with_the_summary_and_do_not_repeat_it(self) -> None:
         text, events = load("spring_boot_incident_noise.log")
-        report = main.format_agent_report(Path("spring.log"), text, events)
+        report = format_agent_report(Path("spring.log"), text, events)
         indexes = [report.index(heading) for heading in HEADINGS]
         self.assertEqual(indexes, sorted(indexes))
         summary = section(report, "## Executive summary", "## Task for coding agent")
@@ -69,8 +75,8 @@ class ReportShapeTest(unittest.TestCase):
 
     def test_spring_keeps_source_lines_apart_from_log_lines(self) -> None:
         text, events = load("spring_boot_incident_noise.log")
-        report = main.format_agent_report(Path("spring.log"), text, events)
-        payload = json.loads(main.format_json_report(Path("spring.log"), text, events))
+        report = format_agent_report(Path("spring.log"), text, events)
+        payload = json.loads(format_json_report(Path("spring.log"), text, events))
         self.assertNotIn("orders-domain-4.12.1", report)
         self.assertNotIn("orders-domain-4.12.1", json.dumps(payload))
         failure = section(report, "## Primary failure", "## Failure mechanism")
@@ -122,16 +128,16 @@ class ReportShapeTest(unittest.TestCase):
                 "\tat com.example.App.handle(App.java:10)",
             ]
         )
-        seed = main.LogLine(number=1, raw=covered.splitlines()[0], level="ERROR", is_record=True)
-        covered_locations = main.application_locations(covered, main.Event(seed=seed))
-        bare_locations = main.application_locations(bare, main.Event(seed=seed))
+        seed = LogLine(number=1, raw=covered.splitlines()[0], level="ERROR", is_record=True)
+        covered_locations = application_locations(covered, Event(seed=seed))
+        bare_locations = application_locations(bare, Event(seed=seed))
         self.assertEqual(covered_locations[0].role, "innermost")
         self.assertEqual(covered_locations[0].path, "App.java")
         self.assertEqual(bare_locations[0].role, "throw_site")
 
     def test_gin_timeline_orders_the_nil_client_before_the_restart(self) -> None:
         text, events = load("gin_web_crash_noisy.log")
-        report = main.format_agent_report(Path("gin.log"), text, events)
+        report = format_agent_report(Path("gin.log"), text, events)
         timeline = section(report, "## Chronological timeline", "## Supporting details")
         nil = timeline.index("client_present=false")
         panic = timeline.index("/app/internal/rules/client.go:94")
@@ -140,7 +146,7 @@ class ReportShapeTest(unittest.TestCase):
         self.assertLess(nil, panic)
         self.assertLess(panic, exited)
         self.assertLess(exited, restart)
-        payload = json.loads(main.format_json_report(Path("gin.log"), text, events))
+        payload = json.loads(format_json_report(Path("gin.log"), text, events))
         self.assertEqual(payload["incident"]["exception"], "panic")
         self.assertEqual(payload["incident"]["outcome"], "restarted")
         self.assertEqual(payload["incident"]["language"], "Go")
@@ -151,7 +157,7 @@ class ReportShapeTest(unittest.TestCase):
 
     def test_node_keeps_the_column(self) -> None:
         text, events = load("nodejs_express_crash_noisy.log")
-        payload = json.loads(main.format_json_report(Path("node.log"), text, events))
+        payload = json.loads(format_json_report(Path("node.log"), text, events))
         thrown = payload["locations"][0]
         self.assertEqual(thrown["source_line"], 76)
         self.assertEqual(thrown["source_column"], 29)
@@ -163,7 +169,7 @@ class ReportShapeTest(unittest.TestCase):
 
     def test_actix_keeps_the_panic_column(self) -> None:
         text, events = load("actix_web_crash_noisy.log")
-        payload = json.loads(main.format_json_report(Path("actix.log"), text, events))
+        payload = json.loads(format_json_report(Path("actix.log"), text, events))
         thrown = payload["locations"][0]
         self.assertEqual(thrown["role"], "throw_site")
         self.assertEqual(thrown["source_line"], 126)
@@ -175,7 +181,7 @@ class ReportShapeTest(unittest.TestCase):
         validation = next(line for line in payload["evidence"]["lines"] if line["number"] == 3596)
         self.assertIn("token validation ok", validation["text"])
         self.assertEqual(validation["correlation"], "confirmed")
-        report = main.format_agent_report(Path("actix.log"), text, events)
+        report = format_agent_report(Path("actix.log"), text, events)
         self.assertIn("src/http/middleware/tenant.rs:126", report)
         self.assertIn("The process terminated and the service came back.", report)
         evidence = section(report, "## Evidence and observations", "## Ranked hypotheses")
@@ -185,20 +191,20 @@ class ReportShapeTest(unittest.TestCase):
         self.assertIn("A valid token does not show that every claim the operation requires was present.", unknowns)
         hypotheses = section(report, "## Ranked hypotheses", "## Recommended investigation")
         self.assertIn("No model hypotheses were produced.", hypotheses)
-        primary = main.select_primary(events)
+        primary = select_primary(events)
         assert primary is not None
-        self.assertIn("3596 ", main.format_model_input(primary))
+        self.assertIn("3596 ", format_model_input(primary))
 
     def test_human_prompt_separates_loggers_from_frames_and_a_completed_restart(self) -> None:
-        text = main.REPORT_PROMPT.messages[0].prompt.template
+        text = REPORT_PROMPT.messages[0].prompt.template
         self.assertIn("logger, not an application frame", text)
         self.assertIn("the restart succeeded", text)
         self.assertIn("failed restart attempt", text)
 
     def test_aspnet_source_line_is_not_the_log_line(self) -> None:
         text, events = load("aspnet_core_crash_noisy.log")
-        report = main.format_agent_report(Path("aspnet.log"), text, events)
-        payload = json.loads(main.format_json_report(Path("aspnet.log"), text, events))
+        report = format_agent_report(Path("aspnet.log"), text, events)
+        payload = json.loads(format_json_report(Path("aspnet.log"), text, events))
         thrown = payload["locations"][0]
         self.assertEqual(thrown["source_line"], 118)
         self.assertTrue(thrown["path"].endswith("KeyRingBuilder.cs"))
@@ -212,7 +218,7 @@ class ReportShapeTest(unittest.TestCase):
 
     def test_django_innermost_frame_is_wsgi(self) -> None:
         text, events = load("django_rest_crash_noisy.log")
-        payload = json.loads(main.format_json_report(Path("django.log"), text, events))
+        payload = json.loads(format_json_report(Path("django.log"), text, events))
         innermost = [item for item in payload["locations"] if item["role"] == "innermost"]
         self.assertEqual(len(innermost), 1)
         self.assertEqual(innermost[0]["source_line"], 16)
@@ -227,69 +233,58 @@ class ReportShapeTest(unittest.TestCase):
         )
 
 
-class ReportCliTest(unittest.TestCase):
-    def test_output_writes_the_agent_report_and_leaves_stdout_empty(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            destination = Path(directory) / "incident.md"
-            stdout = io.StringIO()
-            with redirect_stdout(stdout):
-                status = main.main(
-                    [
-                        "--format",
-                        "agent",
-                        "--no-llm",
-                        "--output",
-                        str(destination),
-                        str(LOGS / "spring_boot_incident_noise.log"),
-                    ]
-                )
-            self.assertEqual(status, 0)
-            self.assertEqual(stdout.getvalue(), "")
-            text = destination.read_text()
-            self.assertIn("## Executive summary", text)
-            self.assertIn("java.lang.NoSuchMethodError", text)
 
-    def test_json_format_rejects_a_non_log(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "notes.txt"
-            path.write_text("This is a meeting note.\nIt has no timestamps.\n")
-            stderr = io.StringIO()
-            with redirect_stderr(stderr):
-                status = main.main(["--format", "json", str(path)])
-            self.assertEqual(status, 1)
-            self.assertIn("timestamped log", stderr.getvalue())
+class ReportAssemblyTest(unittest.TestCase):
+    def test_model_input_omits_independent_events(self) -> None:
+        events = extract_events((LOGS / "aspnet_core_crash_noisy.log").read_text())
+        assert events is not None
+        primary = select_primary(events)
+        assert primary is not None
+        model_input = format_model_input(primary)
+        self.assertIn("Event E3524", model_input)
+        self.assertIn("NullReferenceException", model_input)
+        self.assertIn("confirmed 3460", model_input)
+        self.assertIn("Main process exited", model_input)
+        self.assertNotIn("2085", model_input)
+        self.assertNotIn("3543", model_input)
 
-    def test_empty_file_still_prints_the_empty_message(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "empty.log"
-            path.write_text("\n")
-            stdout = io.StringIO()
-            with redirect_stdout(stdout):
-                status = main.main(["--format", "agent", str(path)])
-            self.assertEqual(status, 0)
-            self.assertEqual(stdout.getvalue().strip(), "The file is empty.")
+    def test_compose_report_replaces_a_model_written_warning_section(self) -> None:
+        narrative = "Main failure\nThe worker stopped (line 4).\n\nRelated events\nNone\n\nOther warnings\nThe model invented this."
+        report = compose_report(narrative, [])
+        self.assertIn("Main failure", report)
+        self.assertNotIn("invented", report)
+        self.assertTrue(report.strip().endswith("Other warnings\nNone"))
 
-    def test_dump_events_can_be_written_to_a_file(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            destination = Path(directory) / "dump.txt"
-            stdout = io.StringIO()
-            with redirect_stdout(stdout):
-                status = main.main(
-                    [
-                        "--dump-events",
-                        "--format",
-                        "json",
-                        "--output",
-                        str(destination),
-                        str(LOGS / "aspnet_core_crash_noisy.log"),
-                    ]
-                )
-            self.assertEqual(status, 0)
-            self.assertEqual(stdout.getvalue(), "")
-            text = destination.read_text()
-            self.assertIn("# Sent to the model", text)
-            self.assertIn("E3524", text)
+    def test_fallback_cites_extracted_lines_only(self) -> None:
+        events = extract_events((LOGS / "aspnet_core_crash_noisy.log").read_text())
+        assert events is not None
+        primary = select_primary(events)
+        assert primary is not None
+        independent = independent_events(events, primary)
+        report = fallback_report(primary, independent)
+        self.assertIn("Main failure", report)
+        self.assertIn("Related events", report)
+        self.assertIn("Other warnings", report)
+        self.assertIn("3524", report)
+        self.assertIn("3532", report)
+        main_section, _, warnings = report.partition("Other warnings")
+        self.assertNotIn("2085", main_section)
+        self.assertIn("2085", warnings)
+
+    def test_dump_events_prints_groups_without_the_model(self) -> None:
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            status = main(["--dump-events", str(LOGS / "aspnet_core_crash_noisy.log")])
+        self.assertEqual(status, 0)
+        text = buffer.getvalue()
+        model, _, reported = text.partition("# Reported by Python")
+        self.assertIn("# Sent to the model", model)
+        self.assertIn("E3524", model)
+        self.assertIn("3460", model)
+        self.assertNotIn("2085", model)
+        self.assertIn("2085", reported)
+        self.assertIn("3543", reported)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

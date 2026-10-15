@@ -1,8 +1,9 @@
 """Summarize a text file with a local Ollama model via LangChain.
 
-A timestamped log is reduced to events in this module, then narrated by the
-model. Any other text file is summarized directly. Progress goes to stderr
-and the report goes to stdout.
+A timestamped log is reduced to events in this module. Python chooses the
+primary incident, its related lines, and the independent warnings. The model
+narrates only the incident. Any other text file is summarized directly.
+Progress goes to stderr and the report goes to stdout.
 """
 
 import argparse
@@ -80,9 +81,12 @@ CASCADE_WINDOW = timedelta(seconds=30)
 # Identical exceptions this close can be one incident. Hours apart cannot.
 SIGNATURE_WINDOW = timedelta(seconds=90)
 # Diagnostic lines older than this are a different episode.
+# Pass another timedelta to extract_events(lookback=...) to change the bound.
 LOOKBACK = timedelta(seconds=30)
 # Same-component lines in this gap are the step that entered the failure.
 IMMEDIATE = timedelta(seconds=3)
+# Recovery lines kept after a restart that belongs to the incident.
+MAX_RECOVERY_LINES = 2
 # Process death, a restart attempt, or the proxy in front of a dead process.
 PROCESS_DEATH = re.compile(
     r"(exited with code|failed to boot|Shutting down: Master|"
@@ -100,15 +104,40 @@ UPSTREAM_FAILURE = re.compile(
     re.IGNORECASE,
 )
 # A completed start. Warnings after this belong to the new process.
-STARTED_SERVICE = re.compile(r"\bStarted [\w.@+-]+\.service\b")
+STARTED_SERVICE = re.compile(
+    r"(?:\bStarted [\w.@+-]+\.service\b|\bApplication started\b|\bNow listening\b)",
+    re.IGNORECASE,
+)
 SERVICE_UNIT = re.compile(r"\b([\w.@+-]+\.service)\b")
 REQUEST_ID = re.compile(r"\brequest[_-]?[Ii]d=([A-Za-z0-9._:-]+)")
+PID_VALUE = re.compile(r"\bpid[=:\s]+(\d+)\b", re.IGNORECASE)
+JOB_ID = re.compile(r"\bjob[_-]?id=([A-Za-z0-9._:-]+)", re.IGNORECASE)
+KEY_ID = re.compile(
+    r"\b(?:key_id|selected_key_id|required_key_id|current_key_id)=(\S+)",
+    re.IGNORECASE,
+)
+FIELD_ID = re.compile(r"\bfield=(\S+)")
+COMPONENT_ID = re.compile(r"\bcomponent=(\S+)")
+CALLBACK_ID = re.compile(r"\bcallback=([A-Za-z0-9_.]+)")
+REVISION_ID = re.compile(r"\brevision=(\d+)")
+DIFF_ARROW = re.compile(r"\b([A-Za-z0-9][\w./:-]{5,})\s*->\s*([A-Za-z0-9][\w./:-]{5,})")
+NODE_RUNTIME = re.compile(r"node:internal|triggerUncaughtException|^\s*\^$|^Node\.js v")
+DOTNET_RUNTIME = re.compile(
+    r"^\s+at (?:System\.|Microsoft\.(?:Extensions|AspNetCore|EntityFrameworkCore)\.)"
+)
+RECOVERY_LINE = re.compile(
+    r"(Application started|Now listening|\blistening (?:addr|host)=|"
+    r"\breadiness=healthy\b|\bliveness=healthy\b)",
+    re.IGNORECASE,
+)
 # Configuration changes, failed setup, and nil or missing state.
 DIAGNOSTIC = re.compile(
     r"(change detected|initialization failed|invalid endpoint|"
     r"<nil>|client_present=false|tenant_id(?:_present)?=(?:false|None)|"
     r"soft_fail=true|swap=scheduled|"
-    r"marking existing transaction as rollback-only)",
+    r"marking existing transaction as rollback-only|"
+    r"\bnot found\b|=null\b|_present=false|matching_keys=0|"
+    r"\bactivated\b|\bdiff\b)",
     re.IGNORECASE,
 )
 # Words too common to tie two lines to the same component.
@@ -148,12 +177,22 @@ GENERIC_TOKENS = {
     "service",
     "signal",
     "span",
+    "start",
+    "started",
     "status",
     "trace",
     "true",
     "uncaught",
     "warn",
     "warning",
+    "active",
+    "build",
+    "present",
+    "record",
+    "result",
+    "running",
+    "update",
+    "value",
 }
 EXCEPTION_SIGNATURE = re.compile(r"((?:\w+\.)*(?:Error|Exception):.+)$")
 REPEAT_REQUEST = re.compile(r'request="[^"]*"')
@@ -189,30 +228,31 @@ COMBINE_PROMPT = ChatPromptTemplate.from_messages(
     ]
 )
 
-# Narrates events extract_events already chose. The three headings are fixed.
+# Narrates the one incident Python already grouped. Other warnings are added later.
 REPORT_PROMPT = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            "You write a short incident report from extracted log events. "
-            "The event labeled primary error is the main failure. "
-            "Describe its Failure lines, including the exception and the application frames. "
-            "Its Same request lines are the related events. "
-            "Events labeled separate error or warning are other warnings. "
-            "Do not describe those as related to the main failure, and do not suggest that they caused it. "
+            "You explain one incident from lines that were already extracted. "
             "Write exactly these headings, in this order:\n"
             "Main failure\n"
             "Related events\n"
-            "Other warnings\n"
-            "Use plain language. After each statement, cite the source line numbers shown, "
+            "Under Main failure, explain the Failure lines and the Context lines. "
+            "Include the exception name and the application frames that are shown. "
+            "Under Related events, describe the Related lines in the order given. "
+            "Those lines are later lines from the same request, process exit, "
+            "proxy failures, restarts, and recovery. "
+            "A context line marked possible is only nearby; do not say it caused the failure. "
+            "Use the timestamp on the Failure line for when the failure happened. "
+            "After each statement, cite the source line numbers shown, "
             "like (line 616) or (lines 649-651). "
-            "Cite only line numbers that appear in the events. "
-            "Use the timestamp on the ERROR line for when the failure happened. "
-            "Do not invent line numbers. Do not suggest a fix. "
-            "Write the three sections once. Do not add notes, drafts, or a second copy. "
-            "If a section has nothing to say, write None under that heading.",
+            "Cite only line numbers that appear below. "
+            "Do not invent line numbers, events, or a cause the lines do not state. "
+            "Do not suggest a fix. "
+            "Write each section once. Do not add notes, drafts, or a second copy. "
+            "If a section has no lines, write None under that heading.",
         ),
-        ("human", "File: {source}\n\nEvents:\n\n{text}"),
+        ("human", "File: {source}\n\nIncident:\n\n{text}"),
     ]
 )
 
@@ -251,6 +291,10 @@ class Event:
     consequences: list[LogLine] = field(default_factory=list)
     repeat_numbers: list[int] = field(default_factory=list)
     repeat_lines: list[LogLine] = field(default_factory=list)
+    # Line numbers whose link to this incident is an id, a unit, or a pid.
+    confirmed: set[int] = field(default_factory=set)
+    # Line numbers kept only because they name the component and sit immediately before it.
+    possible: set[int] = field(default_factory=set)
 
     def lines(self) -> list[LogLine]:
         """Every attached line, in file order. Repeat copies are separate."""
@@ -323,6 +367,8 @@ def keep_stack_line(line: str) -> bool:
     if RUST_RUNTIME_FRAME.match(line) or RUST_RUNTIME_AT.match(line):
         return False
     if PYTHON_RUNTIME_FILE.match(line):
+        return False
+    if NODE_RUNTIME.search(line) or DOTNET_RUNTIME.match(line):
         return False
     return True
 
@@ -487,10 +533,14 @@ def event_tokens(event: Event) -> set[str]:
 def frame_words(raw: str) -> set[str]:
     """File and function names from a stack frame, not its package path."""
     found: set[str] = set()
-    for match in re.finditer(r"([\w$]+)\.(?:java|go|py|rs)(?::\d+|\b)", raw):
+    for match in re.finditer(r"([\w$]+)\.(?:java|go|py|rs|js|ts|cs)(?::\d+|\b)", raw):
         found |= words(match.group(1))
     for match in re.finditer(r"\(\*([\w]+)\)\.([\w]+)", raw):
         found |= words(match.group(1)) | words(match.group(2))
+    for match in re.finditer(r"\bat (?:async )?([\w$.]+)", raw):
+        parts = [part for part in match.group(1).split(".") if part]
+        tail = parts[-2:] if len(parts) > 1 else parts
+        found |= words(" ".join(tail))
     return found
 
 
@@ -504,11 +554,16 @@ def strong_tokens(event: Event) -> set[str]:
         found |= words(signature.split(":", 1)[0].rsplit(".", 1)[-1])
     for line in event.stack:
         found |= frame_words(line.raw)
-    return found
+    return found - words(logger_package(event.seed.logger))
 
 
 def is_routine(line: LogLine) -> bool:
-    """SQL, cache, export, and successful checks are not crash evidence."""
+    """SQL, cache, export, and successful checks are not crash evidence.
+
+    A line that also reports a missing value or a failed setup is kept.
+    """
+    if DIAGNOSTIC.search(line.raw):
+        return False
     if ROUTINE_CONTEXT.search(line.raw):
         return True
     return (
@@ -573,46 +628,158 @@ def attach_context(event: Event, records: list[LogLine]) -> None:
     chosen = [item[2] for item in ranked[:MAX_CONTEXT_LINES]]
     chosen.sort(key=lambda line: line.number)
     event.context.extend(chosen)
+    event.confirmed.update(line.number for line in chosen)
 
 
-def attach_prelude(event: Event, records: list[LogLine]) -> None:
+def line_pid(line: LogLine) -> str | None:
+    match = PID_VALUE.search(line.raw)
+    return match.group(1) if match else None
+
+
+def event_pids(event: Event) -> set[str]:
+    found = {pid for pid in (line_pid(event.seed),) if pid}
+    for line in event.stack:
+        pid = line_pid(line)
+        if pid:
+            found.add(pid)
+    return found
+
+
+def _specific_ids(line: LogLine) -> set[str]:
+    """Ids that can tie a background failure to earlier setup lines."""
+    found: set[str] = set()
+    for pattern in (JOB_ID, KEY_ID, FIELD_ID, COMPONENT_ID, CALLBACK_ID):
+        found.update(pattern.findall(line.raw))
+    for left, right in DIFF_ARROW.findall(line.raw):
+        found.add(left)
+        found.add(right)
+    return {value for value in found if len(value) >= 4}
+
+
+def identifier_values(event: Event) -> set[str]:
+    found = _specific_ids(event.seed)
+    for line in [*event.stack, *event.context]:
+        found |= _specific_ids(line)
+    return found
+
+
+def revision_values(lines: list[LogLine]) -> set[str]:
+    found: set[str] = set()
+    for line in lines:
+        found.update(REVISION_ID.findall(line.raw))
+    return found
+
+
+def _prelude_noise(record: LogLine) -> bool:
+    if record.level in ERROR_LEVELS or is_routine(record):
+        return True
+    return record.level in WARN_LEVELS and NOISY_WARNING.search(record.raw) is not None
+
+
+def _take_context(
+    ranked: list[tuple[int, int, LogLine, str]],
+    room: int,
+) -> list[tuple[LogLine, str]]:
+    """Keep the highest tier, then the lines closest to the failure."""
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    picked: list[tuple[LogLine, str]] = []
+    seen: set[int] = set()
+    for _tier, _closeness, line, relation in ranked:
+        if line.number in seen:
+            continue
+        seen.add(line.number)
+        picked.append((line, relation))
+        if len(picked) >= room:
+            break
+    return picked
+
+
+def _remember(event: Event, picked: list[tuple[LogLine, str]]) -> None:
+    for line, relation in picked:
+        event.context.append(line)
+        if relation == "possible":
+            event.possible.add(line.number)
+        else:
+            event.confirmed.add(line.number)
+
+
+def attach_prelude(
+    event: Event,
+    records: list[LogLine],
+    *,
+    lookback: timedelta = LOOKBACK,
+    max_context: int = MAX_CONTEXT_LINES,
+) -> None:
     """Keep config changes, failed setup, and nil state before a crash.
 
-    Same-trace lines are handled by attach_context. This pass keeps other
-    records that name the same component, and skips ordinary debug chatter.
+    Same-trace lines are handled by attach_context. A line is kept when it
+    shares a component token and is a state change or the immediate step
+    into the failure, or when it shares a job, key, field, or callback id
+    learned from that step. Ordinary debug stays out.
     """
     if not is_serious(event):
         return
     tokens = strong_tokens(event)
-    if not tokens:
-        return
+    anchors = _specific_ids(event.seed)
+    for line in event.stack:
+        anchors |= _specific_ids(line)
     occupied = {line.number for line in event.lines()}
-    chosen: list[tuple[int, int, LogLine]] = []
+    ranked: list[tuple[int, int, LogLine, str]] = []
     for record in records:
         if record.number >= event.seed.number or record.number in occupied:
             continue
-        if record.level in ERROR_LEVELS:
+        if not near(record, event.seed, lookback) or _prelude_noise(record):
             continue
-        if not near(record, event.seed, LOOKBACK):
-            continue
-        if is_routine(record):
-            continue
-        if record.level in WARN_LEVELS and NOISY_WARNING.search(record.raw):
-            continue
-        if not (tokens & line_tokens(record)):
-            continue
-        diagnostic = DIAGNOSTIC.search(record.raw) is not None
+        shared = bool(tokens & line_tokens(record))
+        signal = DIAGNOSTIC.search(record.raw) is not None
         delta = gap(record.moment, event.seed.moment)
         immediate = delta is not None and delta <= IMMEDIATE
-        if not diagnostic and not immediate:
+        closeness = -abs(record.number - event.seed.number)
+        if shared and (signal or immediate):
+            relation = "confirmed" if signal else "possible"
+            ranked.append((4 if signal else 3, closeness, record, relation))
             continue
-        chosen.append((1 if diagnostic else 0, record.number, record))
-    room = MAX_CONTEXT_LINES - len(event.context)
+        if anchors and (_specific_ids(record) & anchors):
+            ranked.append((3, closeness, record, "confirmed"))
+    room = max_context - len(event.context)
+    if room > 0:
+        _remember(event, _take_context(ranked, room))
+    _attach_linked_setup(event, records, lookback=lookback, max_context=max_context)
+    event.context.sort(key=lambda line: line.number)
+
+
+def _attach_linked_setup(
+    event: Event,
+    records: list[LogLine],
+    *,
+    lookback: timedelta,
+    max_context: int,
+) -> None:
+    """Pull earlier setup lines that share an id found on the lines already kept."""
+    room = max_context - len(event.context)
     if room <= 0:
         return
-    chosen.sort(reverse=True)
-    event.context.extend(item[2] for item in chosen[:room])
-    event.context.sort(key=lambda line: line.number)
+    anchors = identifier_values(event)
+    revisions = revision_values([event.seed, *event.stack, *event.context])
+    if not anchors and not revisions:
+        return
+    occupied = {line.number for line in event.lines()}
+    ranked: list[tuple[int, int, LogLine, str]] = []
+    for record in records:
+        if record.number >= event.seed.number or record.number in occupied:
+            continue
+        if not near(record, event.seed, lookback) or _prelude_noise(record):
+            continue
+        if not DIAGNOSTIC.search(record.raw):
+            continue
+        closeness = -abs(record.number - event.seed.number)
+        if anchors and (_specific_ids(record) & anchors):
+            ranked.append((3, closeness, record, "confirmed"))
+            continue
+        shared_revision = revisions and (set(REVISION_ID.findall(record.raw)) & revisions)
+        if shared_revision:
+            ranked.append((2, closeness, record, "confirmed"))
+    _remember(event, _take_context(ranked, room))
 
 
 def is_serious(event: Event) -> bool:
@@ -636,10 +803,17 @@ def absorb_prelude_warnings(events: list[Event]) -> list[Event]:
     return [event for event in events if event.seed.number not in claimed]
 
 
-def extract_events(text: str) -> list[Event] | None:
+def extract_events(
+    text: str,
+    *,
+    lookback: timedelta = LOOKBACK,
+    max_context: int = MAX_CONTEXT_LINES,
+) -> list[Event] | None:
     """Group a timestamped log into numbered events.
 
     Returns None when the file is not a timestamped log.
+    `lookback` bounds how far setup lines may precede a failure.
+    `max_context` bounds how many of those lines stay with it.
     """
     raw_lines = text.splitlines()
     if sum(1 for line in raw_lines if LOG_RECORD.match(line)) < 5:
@@ -691,6 +865,7 @@ def extract_events(text: str) -> list[Event] | None:
         )
         if owner is not None and line.trace_id:
             owner.members.append(line)
+            owner.confirmed.add(line.number)
             current = owner
             continue
         current = Event(seed=line)
@@ -699,9 +874,11 @@ def extract_events(text: str) -> list[Event] | None:
     records = [line for line in parsed if line.is_record]
     for event in events:
         attach_context(event, records)
-        attach_prelude(event, records)
+        attach_prelude(event, records, lookback=lookback, max_context=max_context)
     events = absorb_prelude_warnings(events)
-    return collapse_repeat_events(group_cascades(events, records), records)
+    grouped = group_cascades(events, records)
+    attach_lifecycle(grouped, records)
+    return collapse_repeat_events(grouped, records)
 
 
 def exception_signature(event: Event) -> str | None:
@@ -736,10 +913,17 @@ def consequence_kind(event: Event) -> str | None:
     return None
 
 
+def service_started(line: LogLine) -> bool:
+    """True when this line is a completed service start, not a start attempt."""
+    if STARTED_SERVICE.search(line.raw):
+        return True
+    return "systemd" in line.logger.lower() and re.search(r"\bStarted\b", line.message) is not None
+
+
 def started_between(earlier: LogLine, later: LogLine, records: list[LogLine]) -> bool:
     """True when a service finished starting between the two lines."""
     for record in records:
-        if earlier.number < record.number < later.number and STARTED_SERVICE.search(record.raw):
+        if earlier.number < record.number < later.number and service_started(record):
             return True
     return False
 
@@ -767,30 +951,84 @@ def same_incident(owner: Event, event: Event, records: list[LogLine]) -> bool:
     return not started_between(owner.seed, event.seed, records)
 
 
+def unit_parts(unit: str) -> set[str]:
+    stem = unit.removesuffix(".service").lower()
+    return {part for part in re.split(r"[^a-z0-9]+", stem) if len(part) >= 5 and part not in GENERIC_TOKENS}
+
+
 def mentions_unit(event: Event, unit: str) -> bool:
     """True when the exception names this systemd unit or its service."""
     stem = unit.removesuffix(".service").lower()
-    if stem in event.seed.logger.lower():
+    if stem and stem in event.seed.logger.lower():
         return True
-    return bool(words(stem) & event_tokens(event))
+    parts = unit_parts(unit)
+    if not parts:
+        return False
+    return bool(parts & (words(event.seed.logger) | event_tokens(event)))
+
+
+def serious_in_window(event: Event, grouped: list[Event]) -> list[Event]:
+    return [
+        owner
+        for owner in grouped
+        if is_serious(owner) and near(owner.seed, event.seed, CASCADE_WINDOW)
+    ]
+
+
+def pids_agree(owner: Event, line: LogLine) -> bool:
+    """A pid on both sides must be the same pid. A missing pid does not rule the line out."""
+    pid = line_pid(line)
+    known = event_pids(owner)
+    if pid and known:
+        return pid in known
+    return True
+
+
+def has_death(event: Event) -> bool:
+    if consequence_kind(event) == "death":
+        return True
+    return any(lifecycle_kind(line) == "death" for line in event.consequences)
 
 
 def cascade_owner(event: Event, grouped: list[Event]) -> Event | None:
-    """Find the exception this process death or proxy failure belongs to."""
-    if consequence_kind(event) is None:
+    """Find the exception this process death or proxy failure belongs to.
+
+    A unit name or a shared pid is a confirmed link. A proxy line joins the
+    exception that already has that process death. Time by itself is not enough
+    when more than one exception is in the window.
+    """
+    kind = consequence_kind(event)
+    if kind is None:
         return None
-    in_window = [
-        owner
-        for owner in grouped
-        if exception_signature(owner) and near(owner.seed, event.seed, CASCADE_WINDOW)
-    ]
+    in_window = serious_in_window(event, grouped)
     if not in_window:
         return None
+    if kind == "upstream":
+        owners = [owner for owner in in_window if has_death(owner)]
+        return owners[-1] if len(owners) == 1 else (in_window[0] if len(in_window) == 1 else None)
+    pid = line_pid(event.seed)
+    if pid:
+        named = [owner for owner in in_window if pid in event_pids(owner)]
+        if named:
+            return named[-1]
     units = SERVICE_UNIT.findall(event.seed.raw)
     if units:
-        named = [owner for owner in in_window if any(mentions_unit(owner, unit) for unit in units)]
+        named = [
+            owner
+            for owner in in_window
+            if pids_agree(owner, event.seed) and any(mentions_unit(owner, unit) for unit in units)
+        ]
         return named[-1] if named else None
-    return in_window[-1]
+    same_logger = [
+        owner
+        for owner in in_window
+        if owner.seed.logger and owner.seed.logger == event.seed.logger and pids_agree(owner, event.seed)
+    ]
+    if len(same_logger) == 1:
+        return same_logger[0]
+    if len(in_window) == 1 and pids_agree(in_window[0], event.seed):
+        return in_window[0]
+    return None
 
 
 def take_in(owner: Event, event: Event) -> None:
@@ -800,6 +1038,13 @@ def take_in(owner: Event, event: Event) -> None:
     owner.members.extend(event.context)
     owner.members.extend(event.members)
     owner.consequences.extend(event.consequences)
+    owner.confirmed.update(event.confirmed)
+    owner.possible.update(event.possible)
+
+
+def _claim(owner: Event, line: LogLine) -> None:
+    owner.consequences.append(line)
+    owner.confirmed.add(line.number)
 
 
 def group_cascades(events: list[Event], records: list[LogLine]) -> list[Event]:
@@ -816,12 +1061,101 @@ def group_cascades(events: list[Event], records: list[LogLine]) -> list[Event]:
             take_in(owner, event)
             continue
         owner = cascade_owner(event, grouped)
+        if (
+            owner is not None
+            and consequence_kind(event) == "upstream"
+            and started_between(owner.seed, event.seed, records)
+        ):
+            owner = None
         if owner is not None:
-            owner.consequences.extend(event.lines())
+            for line in event.lines():
+                _claim(owner, line)
             owner.repeat_numbers.extend(event.repeat_numbers)
             continue
         grouped.append(event)
     return grouped
+
+
+def lifecycle_kind(line: LogLine) -> str | None:
+    """Classify a record as process death, restart, start, proxy failure, or recovery."""
+    text = line.message or line.raw
+    logger = line.logger.lower()
+    if PROCESS_DEATH.search(text):
+        return "death"
+    if service_started(line):
+        return "started"
+    if PROCESS_RESTART.search(text) and ("systemd" in logger or ".service" in text):
+        return "restart"
+    proxy = "nginx" in logger or logger.startswith("upstream") or "upstream" in logger
+    if proxy and UPSTREAM_FAILURE.search(text):
+        return "upstream"
+    if RECOVERY_LINE.search(text):
+        return "recovery"
+    return None
+
+
+def _units_of(event: Event) -> set[str]:
+    units = set(SERVICE_UNIT.findall(event.seed.raw))
+    for line in event.lines():
+        units.update(SERVICE_UNIT.findall(line.raw))
+    return units
+
+
+def _service_overlap(event: Event, line: LogLine) -> bool:
+    units = SERVICE_UNIT.findall(line.raw)
+    if units and any(mentions_unit(event, unit) for unit in units):
+        return pids_agree(event, line)
+    known = _units_of(event)
+    if units and known & set(units):
+        return pids_agree(event, line)
+    blob = words(line.logger) | words(line.message or line.raw)
+    return any(bool(unit_parts(unit) & blob) for unit in known)
+
+
+def attach_lifecycle(events: list[Event], records: list[LogLine]) -> None:
+    """Add supervisor, proxy, restart, and recovery lines that are not their own events.
+
+    Upstream failures attach only after a confirmed process death and before
+    the service is back. A later 502 from the application stays independent.
+    """
+    occupied = {line.number for event in events for line in event.lines()}
+    for event in events:
+        if not is_serious(event):
+            continue
+        started = False
+        recovery_left = MAX_RECOVERY_LINES
+        for record in records:
+            if record.number <= event.seed.number:
+                continue
+            if not near(event.seed, record, CASCADE_WINDOW):
+                if (
+                    event.seed.moment
+                    and record.moment
+                    and record.moment > event.seed.moment + CASCADE_WINDOW
+                ):
+                    break
+                continue
+            kind = lifecycle_kind(record)
+            if record.number in occupied:
+                if kind == "started":
+                    started = True
+                continue
+            if kind is None or not pids_agree(event, record):
+                continue
+            if kind == "upstream":
+                if started or not has_death(event):
+                    continue
+            elif kind == "recovery":
+                if not started or recovery_left <= 0 or not _service_overlap(event, record):
+                    continue
+                recovery_left -= 1
+            elif not _service_overlap(event, record):
+                continue
+            if kind == "started":
+                started = True
+            _claim(event, record)
+            occupied.add(record.number)
+        event.consequences.sort(key=lambda line: line.number)
 
 
 def collapse_repeat_events(events: list[Event], records: list[LogLine]) -> list[Event]:
@@ -869,19 +1203,18 @@ def event_kind(event: Event) -> str:
 
 
 def format_events(events: list[Event]) -> str:
-    """Render the blocks the report prompt is allowed to narrate.
+    """Render every extracted event. The model receives format_model_input instead.
 
-    A primary error is labeled Failure and Same request. Those headings are
-    what the prompt maps onto Main failure and Related events. Fallout stays
-    under Failure. Prelude and same-request lines stay under Same request.
-    Other events are labeled Detail, or emitted as a collapsed warning.
+    A primary error is labeled Failure and Same request. Fallout stays under
+    Failure. Prelude and same-request lines stay under Same request. Other
+    events are labeled Detail, or emitted as a collapsed warning.
     """
     blocks: list[str] = []
-    for index, event in enumerate(events, start=1):
+    for event in events:
         kind = event_kind(event)
         numbers = [line.number for line in event.lines()]
         numbers.extend(event.repeat_numbers)
-        header = f"Event {index} ({kind}) lines {format_span(numbers)}"
+        header = f"Event E{event.seed.number} ({kind}) lines {format_span(numbers)}"
         if kind == "warning":
             body = "\n".join(format_collapsed(group) for group in collapse_lines(event.lines()))
             if (
@@ -917,6 +1250,130 @@ def format_events(events: list[Event]) -> str:
             )
         blocks.append("\n".join(parts))
     return "\n\n".join(blocks)
+
+
+def event_id(event: Event) -> str:
+    """Stable id taken from the source line that opened the event."""
+    return f"E{event.seed.number}"
+
+
+def select_primary(events: list[Event]) -> Event | None:
+    """The incident to explain. A terminating failure outranks an earlier error."""
+    serious = [event for event in events if is_serious(event)]
+    if not serious:
+        return None
+
+    def rank(event: Event) -> tuple[int, int, int, int]:
+        return (
+            1 if event.consequences else 0,
+            1 if event.seed.level in {"FATAL", "CRITICAL"} else 0,
+            len(event.stack),
+            event.seed.number,
+        )
+
+    return max(serious, key=rank)
+
+
+def independent_events(events: list[Event], primary: Event | None) -> list[Event]:
+    if primary is None:
+        return list(events)
+    return [event for event in events if event is not primary]
+
+
+def _context_label(event: Event, line: LogLine) -> str:
+    if line.number in event.possible and line.number not in event.confirmed:
+        return "possible"
+    return "confirmed"
+
+
+def split_incident(event: Event) -> tuple[list[LogLine], list[LogLine]]:
+    """Preceding context, then associated lines that follow the failure."""
+    surrounding = sorted([*event.context, *event.members], key=lambda line: line.number)
+    before = [line for line in surrounding if line.number < event.seed.number]
+    after = [line for line in surrounding if line.number > event.seed.number]
+    related = sorted([*after, *event.consequences], key=lambda line: line.number)
+    return before, related
+
+
+def format_model_input(event: Event) -> str:
+    """Incident text for the model. Independent events are left out."""
+    before, related = split_incident(event)
+    parts = [
+        f"Event {event_id(event)}",
+        "Failure:",
+        "\n".join(format_line(line) for line in [event.seed, *event.stack]),
+        "Context:",
+        "\n".join(f"{_context_label(event, line)} {format_line(line)}" for line in before) or "None",
+        "Related:",
+        "\n".join(format_collapsed(group) for group in collapse_lines(related)) or "None",
+    ]
+    return "\n".join(parts)
+
+
+def format_warning_row(event: Event) -> str:
+    """One independent event, identified by its source line."""
+    if (
+        len(event.repeat_lines) > 1
+        and not event.stack
+        and not event.members
+        and not event.consequences
+    ):
+        return f"{event_id(event)} {format_collapsed(event.repeat_lines)}"
+    parts = [format_line(event.seed)]
+    signature = exception_signature(event)
+    if signature and signature not in parts[0]:
+        parts.append(signature)
+    frame = next(
+        (
+            line
+            for line in event.stack
+            if re.search(r"\.(?:java|py|go|rs|js|cs)(?::\d+|:line \d+)", line.raw)
+        ),
+        None,
+    )
+    if frame is not None:
+        parts.append(format_line(frame))
+    return f"{event_id(event)} " + " | ".join(parts)
+
+
+def format_other_warnings(events: list[Event]) -> str:
+    if not events:
+        return "Other warnings\nNone"
+    return "Other warnings\n" + "\n".join(format_warning_row(event) for event in events)
+
+
+def fallback_narrative(event: Event | None) -> str:
+    """Main failure and Related events taken straight from the extracted lines."""
+    if event is None:
+        return "Main failure\nNone\n\nRelated events\nNone"
+    before, related = split_incident(event)
+    main = ["Main failure", "\n".join(format_line(line) for line in [event.seed, *event.stack])]
+    if before:
+        main.append("Preceding context:")
+        main.append("\n".join(format_line(line) for line in before))
+    related_body = (
+        "\n".join(format_collapsed(group) for group in collapse_lines(related)) if related else "None"
+    )
+    return "\n".join(main) + "\n\nRelated events\n" + related_body
+
+
+def compose_report(narrative: str, independent: list[Event]) -> str:
+    """Keep the model's two sections and append warnings Python already listed."""
+    text = narrative.strip()
+    text = re.split(r"\n(?=\**\s*Other warnings\b)", text, maxsplit=1)[0].rstrip()
+    return f"{text}\n\n{format_other_warnings(independent)}"
+
+
+def fallback_report(primary: Event | None, independent: list[Event]) -> str:
+    return compose_report(fallback_narrative(primary), independent)
+
+
+def dump_events(events: list[Event]) -> str:
+    """Show the model input and the independent events reported by Python."""
+    primary = select_primary(events)
+    independent = independent_events(events, primary)
+    model_input = format_model_input(primary) if primary is not None else "Primary incident\nNone"
+    return f"# Sent to the model\n{model_input}\n\n# Reported by Python\n{format_other_warnings(independent)}"
 
 
 def collect_summary(chain, payload: dict[str, str]) -> str | None:
@@ -994,12 +1451,12 @@ def build_llm(*, reasoning: bool = False, num_predict: int = 1024) -> ChatOllama
     )
 
 
-def interpret_events(path: Path, events: list[Event]) -> str:
+def interpret_events(path: Path, event: Event) -> str:
     print(
-        f"Interpreting {len(events)} events with {MODEL_NAME}...",
+        f"Interpreting event {event_id(event)} with {MODEL_NAME}...",
         file=sys.stderr,
     )
-    payload = {"source": path.name, "text": format_events(events)}
+    payload = {"source": path.name, "text": format_model_input(event)}
     budgets = (2048, 4096)
     for attempt, budget in enumerate(budgets):
         if attempt:
@@ -1025,11 +1482,23 @@ def summarize(path: Path, text: str) -> str:
     if events is not None:
         if not events:
             return "No relevant errors or warnings were found."
+        primary = select_primary(events)
+        independent = independent_events(events, primary)
         print(
             f"Extracted {len(events)} events from {len(text.splitlines())} lines.",
             file=sys.stderr,
         )
-        return interpret_events(path, events)
+        if primary is None:
+            return fallback_report(None, independent)
+        try:
+            narrative = interpret_events(path, primary)
+        except GenerationError:
+            print(
+                "The model did not produce a summary. Using the extracted events.",
+                file=sys.stderr,
+            )
+            narrative = fallback_narrative(primary)
+        return compose_report(narrative, independent)
 
     print(f"Summarizing {path} with {MODEL_NAME}...", file=sys.stderr)
     llm = build_llm()
@@ -1052,6 +1521,11 @@ def main(argv: list[str] | None = None) -> int:
         description="Digest a log, or summarize another text file with a local Ollama model.",
     )
     parser.add_argument("file", type=Path, help="Path to the file to summarize")
+    parser.add_argument(
+        "--dump-events",
+        action="store_true",
+        help="Print the extracted incident groups and exit without calling the model.",
+    )
     args = parser.parse_args(argv)
 
     path: Path = args.file
@@ -1070,6 +1544,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if not text.strip():
         print("The file is empty.")
+        return 0
+
+    if args.dump_events:
+        events = extract_events(text)
+        if events is None:
+            print("Not a timestamped log.")
+            return 0
+        print(dump_events(events))
         return 0
 
     try:

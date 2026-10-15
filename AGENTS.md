@@ -51,3 +51,5 @@ Keep this work in code. Do not ask the model to filter, group, or recover line n
 The report prompt may only ask the model to narrate the extracted events. It must cite line numbers that appear in the event list, use the timestamp on the `ERROR` line, and not suggest a fix. Extra instructions that ask it to reclassify warning events or invent missing lines make this model write a thinking trace, repeat the report, or cite lines that were filtered out.
 
 The non-log summary keeps `reasoning=False`. Do not point that path at the log report prompt.
+
+The project is under the MIT license. The notice is in [`LICENSE`](LICENSE).

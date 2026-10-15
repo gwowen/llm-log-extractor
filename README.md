@@ -50,3 +50,7 @@ Extraction is checked without the model:
 ```bash
 uv run python -m unittest
 ```
+
+## License
+
+[MIT](LICENSE)

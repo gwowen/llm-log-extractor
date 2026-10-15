@@ -1,0 +1,28 @@
+Started by user casey
+[Pipeline] Start of Pipeline
+[Pipeline] node
+Running on linux-node-07 in /var/lib/jenkins/workspace/ledger
+[Pipeline] {
+[Pipeline] stage
+[Pipeline] { (Migrate)
+[Pipeline] sh
++ ./scripts/migrate.sh
+Attempting schema migration against the staging database
+ERROR: Connection refused
+Waiting 2 seconds before retry
+retry succeeded
+Applied 4 migrations
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] stage
+[Pipeline] { (Test)
+[Pipeline] sh
++ pytest -q
+.....
+5 passed in 0.31s
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] }
+[Pipeline] // node
+[Pipeline] End of Pipeline
+Finished: SUCCESS

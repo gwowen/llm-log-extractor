@@ -60,18 +60,29 @@ def summarize_chunks(
     )
 
 
-def interpret_events(path: Path, event: Event, model: str | None = None) -> str:
+def interpret_events(
+    path: Path,
+    event: Event,
+    model: str | None = None,
+    *,
+    prompt: ChatPromptTemplate | None = None,
+    incident_text: str | None = None,
+) -> str:
     """Narrate one incident. An empty thinking trace is retried once with a larger budget.
 
     The retry builds a new client with `num_predict` raised from 2048 to 4096.
     The same budget is not tried twice. A second empty reply raises GenerationError.
+    Jenkins reports pass their own prompt and the extracted incident text.
     """
     chosen = model or MODEL_NAME
     print(
         f"Interpreting event {event_id(event)} with {chosen}...",
         file=sys.stderr,
     )
-    payload = {"source": path.name, "text": format_model_input(event)}
+    payload = {
+        "source": path.name,
+        "text": incident_text if incident_text is not None else format_model_input(event),
+    }
     budgets = (2048, 4096)
     for attempt, budget in enumerate(budgets):
         if attempt:
@@ -80,7 +91,7 @@ def interpret_events(path: Path, event: Event, model: str | None = None) -> str:
                 "Retrying with a larger token budget...",
                 file=sys.stderr,
             )
-        chain = REPORT_PROMPT | build_llm(reasoning=True, num_predict=budget, model=model)
+        chain = (prompt or REPORT_PROMPT) | build_llm(reasoning=True, num_predict=budget, model=model)
         answer = collect_summary(chain, payload)
         if answer:
             return answer

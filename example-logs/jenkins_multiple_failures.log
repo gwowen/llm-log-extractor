@@ -1,0 +1,34 @@
+Started by user riley
+[Pipeline] Start of Pipeline
+[Pipeline] node
+Running on linux-node-04 in /var/lib/jenkins/workspace/ledger
+[Pipeline] {
+[Pipeline] stage
+[Pipeline] { (Unit tests)
+[Pipeline] sh
++ pytest -q tests/test_account.py
+============================= test session starts ==============================
+collected 2 items
+tests/test_account.py F.
+=================================== FAILURES ===================================
+______________________________ test_account_id ________________________________
+E       AssertionError: assert 'abc' == 'xyz'
+tests/test_account.py:27: AssertionError
+FAILED tests/test_account.py::test_account_id - AssertionError: assert 'abc' == 'xyz'
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] stage
+[Pipeline] { (Lint)
+[Pipeline] sh
++ npm run lint
+> ledger@1.0.0 lint
+> tsc --noEmit --pretty false
+src/legacy.ts(8,4): error TS2322: Type 'string' is not assignable to type 'number'.
+Found 1 error in src/legacy.ts:8
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] }
+[Pipeline] // node
+[Pipeline] End of Pipeline
+ERROR: script returned exit code 2
+Finished: FAILURE

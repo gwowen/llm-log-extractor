@@ -93,6 +93,42 @@ class EvidenceRecord:
 
 
 @dataclass
+class JenkinsCandidate:
+    """Another failure the log shows. It is not claimed as the cause of the primary."""
+
+    message: str
+    category: str
+    stage: str | None
+    stage_association: str
+    log_line: int
+    source_file: str | None = None
+    source_line: int | None = None
+
+
+@dataclass
+class JenkinsFacts:
+    """Deterministic Jenkins fields. Absent on an application-log report."""
+
+    job_style: str
+    build_result: str | None
+    failed_stage: str | None
+    stage_association: str | None
+    failure_category: str | None
+    failed_command: str | None
+    exit_code: int | None
+    primary_message: str | None
+    source_file: str | None
+    source_line: int | None
+    source_column: int | None
+    symptom: bool
+    log_lines: list[int]
+    possible_stages: list[str] = field(default_factory=list)
+    candidates: list[JenkinsCandidate] = field(default_factory=list)
+    investigation_targets: list[str] = field(default_factory=list)
+    suggested_actions: list[str] = field(default_factory=list)
+
+
+@dataclass
 class IncidentReport:
     """The one incident both the Markdown brief and the JSON document describe."""
 
@@ -118,6 +154,7 @@ class IncidentReport:
     stack: str
     excerpts: str
     other_warnings: list[dict]
+    jenkins: JenkinsFacts | None = None
 
 
 @dataclass

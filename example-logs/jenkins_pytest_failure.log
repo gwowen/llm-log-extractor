@@ -1,0 +1,35 @@
+Started by user riley
+[Pipeline] Start of Pipeline
+[Pipeline] node
+Running on linux-node-04 in /var/lib/jenkins/workspace/ledger
+[Pipeline] {
+[Pipeline] stage
+[Pipeline] { (Unit tests)
+[Pipeline] sh
++ pytest -q tests/test_account.py
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-8.3.2
+cachedir: .pytest_cache
+rootdir: /var/lib/jenkins/workspace/ledger
+collected 4 items
+
+tests/test_account.py ..F.
+=================================== FAILURES ===================================
+______________________________ test_account_id ________________________________
+    def test_account_id():
+>       assert account == "xyz"
+E       AssertionError: assert 'abc' == 'xyz'
+E         - xyz
+E         + abc
+
+tests/test_account.py:27: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_account.py::test_account_id - AssertionError: assert 'abc' == 'xyz'
+1 failed, 3 passed in 0.42s
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] }
+[Pipeline] // node
+[Pipeline] End of Pipeline
+ERROR: script returned exit code 1
+Finished: FAILURE

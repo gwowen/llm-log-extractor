@@ -1,0 +1,11 @@
+Started by user alice
+Building in workspace /var/lib/jenkins/workspace/nightly-job
+[nightly-job] $ /bin/sh -xe /tmp/jenkins8472.sh
++ make test
+gcc -Wall -c src/util.c -o src/util.o
+gcc -Wall -c src/main.c -o src/main.o
+src/main.c:12:5: error: 'foo' undeclared (first use in this function)
+src/main.c:12:5: note: each undeclared identifier is reported only once
+make: *** [Makefile:14: test] Error 1
+Build step 'Execute shell' marked build as failure
+Finished: FAILURE

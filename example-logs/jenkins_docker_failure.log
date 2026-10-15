@@ -1,0 +1,30 @@
+Started by user jordan
+[Pipeline] Start of Pipeline
+[Pipeline] node
+Running on linux-node-09 in /var/lib/jenkins/workspace/payments-image
+[Pipeline] {
+[Pipeline] stage
+[Pipeline] { (Container image)
+[Pipeline] sh
++ docker build -t payments:42 .
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 412B done
+#2 [internal] load metadata for docker.io/library/python:3.12-slim
+#2 DONE 0.4s
+#3 [2/5] WORKDIR /app
+#3 DONE 0.1s
+#4 [3/5] COPY requirements.txt .
+#4 DONE 0.0s
+#5 [4/5] RUN pip install -r requirements.txt
+#5 1.204 Collecting flask
+#5 2.881 ERROR: Could not find a version that satisfies the requirement missing-payments-lib
+#5 2.881 ERROR: No matching distribution found for missing-payments-lib
+#5 ERROR: process "/bin/sh -c pip install -r requirements.txt" did not complete successfully: exit code: 1
+ERROR: failed to solve: process "/bin/sh -c pip install -r requirements.txt" did not complete successfully: exit code: 1
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] }
+[Pipeline] // node
+[Pipeline] End of Pipeline
+ERROR: script returned exit code 1
+Finished: FAILURE

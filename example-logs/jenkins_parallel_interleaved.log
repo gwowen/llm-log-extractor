@@ -1,0 +1,31 @@
+Started by user casey
+[Pipeline] Start of Pipeline
+[Pipeline] node
+Running on linux-node-07 in /var/lib/jenkins/workspace/parallel-checks
+[Pipeline] {
+[Pipeline] stage
+[Pipeline] { (Verify)
+[Pipeline] parallel
+[Pipeline] {
+[Pipeline] stage
+[Pipeline] { (Unit tests)
+[Pipeline] stage
+[Pipeline] { (Lint)
+[Unit tests] + pytest -q
+[Lint] + npm run lint
+mixed output from both branches without a prefix
+src/app.ts(3,1): error TS2322: Type 'string' is not assignable to type 'number'.
+[Unit tests] FAILED tests/test_app.py::test_ok - AssertionError: assert 0 == 1
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] }
+[Pipeline] // parallel
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] }
+[Pipeline] // node
+[Pipeline] End of Pipeline
+ERROR: script returned exit code 1
+Finished: FAILURE

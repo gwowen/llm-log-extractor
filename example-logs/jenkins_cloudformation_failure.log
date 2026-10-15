@@ -1,0 +1,22 @@
+Started by user jordan
+[Pipeline] Start of Pipeline
+[Pipeline] node
+Running on linux-node-03 in /var/lib/jenkins/workspace/payments-infra
+[Pipeline] {
+[Pipeline] stage
+[Pipeline] { (Deploy staging)
+[Pipeline] sh
++ aws cloudformation deploy --template-file infra/app.yaml --stack-name payments-staging --capabilities CAPABILITY_IAM
+
+Waiting for changeset to be created..
+Waiting for stack create/update to complete
+
+Failed to create the changeset: Waiter ChangeSetCreateComplete failed: Waiter encountered a terminal failure state: For expression "Status" we matched expected path: "FAILED" Status: FAILED. Reason: The following resource(s) failed to create: [PaymentsTable].
+An error occurred (ValidationError) when calling the CreateChangeSet operation: Template format error: unsupported structure.
+[Pipeline] }
+[Pipeline] // stage
+[Pipeline] }
+[Pipeline] // node
+[Pipeline] End of Pipeline
+ERROR: script returned exit code 255
+Finished: FAILURE
